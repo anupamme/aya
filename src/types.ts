@@ -223,6 +223,8 @@ export interface WorkingTab {
   sharedDir?: true;
   /** Opened for a team role: every launch is widened to reach Aya, unless Aya may not lift the block. */
   teamLaunch?: boolean;
+  /** A tab opened on a machine from the machines popover: it runs `ssh -- <sshTarget>` instead of its preset's command. */
+  sshTarget?: string;
 }
 
 export interface SplitLayout {
@@ -770,6 +772,9 @@ export interface AyaApi {
   ): Promise<string>;
   listRemotePresets(sshTarget: string): Promise<Preset[]>;
   checkRemoteHealth(sshTarget: string): Promise<RemoteHealthResult>;
+  machinesStatus(): Promise<{ version: number; machines: MachineView[] }>;
+  machinesSetup(): Promise<{ machines: Machine[]; hosts: KnownHost[] }>;
+  machinesCommand(argv: string[]): Promise<string>;
   createRemoteProjectOnHost(
     sshTarget: string,
     directory: string,
@@ -973,6 +978,8 @@ export interface TerminalState {
    *  Agent presets may append --resume only in this case. */
   restored?: boolean;
   /** Opened for a team role (WorkingTab.teamLaunch). */
+  /** Opened on a machine (WorkingTab.sshTarget). */
+  sshTarget?: string;
   teamLaunch?: boolean;
   /** Last session id the agent reported over OSC 9001, mirrored from (and
    *  persisted back to) the project's WorkingTab so a restore can resume this
@@ -1228,4 +1235,59 @@ export interface RoleDraft {
   responsibilities: string;
   mustNot: string;
   sendsTo: SendRoute[];
+}
+
+// Machines (electron/machines.ts, electron/machines-probe.ts).
+export interface GpuLoad {
+  name: string;
+  utilPct: number | null;
+  memUsedMiB: number | null;
+  memTotalMiB: number | null;
+}
+
+export interface LoadedModel {
+  name: string;
+  vramBytes: number | null;
+  expiresAt: string | null;
+  pinned: boolean;
+}
+
+export interface MachineStatus {
+  reachable: boolean;
+  checkedAt: string;
+  error: string | null;
+  cpuName: string | null;
+  cpus: number | null;
+  load1: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  gpus: GpuLoad[];
+  gpuError: string | null;
+  ollama: { up: boolean; version: string | null; loaded: LoadedModel[] | null; modelsError: string | null; installed: boolean | null; running: boolean | null };
+}
+
+export type MachineReach = "local" | { ssh: string };
+
+export interface MachineClaim {
+  by: string;
+  pane?: string;
+  purpose: string;
+  since: string;
+}
+
+export interface MachineView {
+  id: string;
+  reach: MachineReach;
+  ollama: { port: number };
+  claim?: MachineClaim;
+  status: MachineStatus;
+}
+
+/** A machine as saved, without its status: what Settings > Machines lists. */
+export type Machine = Omit<MachineView, "status">;
+
+export interface KnownHost {
+  target: string;
+  sources: ("ssh config" | "remote project")[];
+  machine?: string;
 }

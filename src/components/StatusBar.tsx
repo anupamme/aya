@@ -8,6 +8,8 @@ import type {
   WorktreeStatus,
 } from "../types";
 import { diffFileLineIndex } from "../diff-navigation";
+import type { SettingsTab } from "../settings-tabs";
+import { MachinesStatus } from "./MachinesStatus";
 
 // Material Symbols small icon size (px) used for status-bar glyphs
 const ICON_SIZE_SM_PX = 13;
@@ -41,6 +43,9 @@ interface Props {
   onToggleSnippets: () => void;
   onOpenAttentionCenter: () => void;
   onOpenTeams: () => void;
+  onOpenSettings: (tab: SettingsTab) => void;
+  /** Opens a tab running ssh to a machine; absent with no project to open it in. */
+  onOpenMachineTerminal?: (sshTarget: string) => void;
 }
 
 /** Last path segment — how a worktree is named in the UI (git itself has no
@@ -66,6 +71,8 @@ function StatusBarImpl({
   onToggleSnippets,
   onOpenAttentionCenter,
   onOpenTeams,
+  onOpenSettings,
+  onOpenMachineTerminal,
 }: Props) {
   const waiting = terminal?.status === "waiting";
   // The main checkout's (symlink-resolved) path — the same shape gitDirectory
@@ -211,6 +218,7 @@ function StatusBarImpl({
         </span>
       )}
       <div className="aya-statusbar-spacer" />
+      <MachinesStatus onManage={() => onOpenSettings("machines")} onOpenTerminal={onOpenMachineTerminal} />
       <button
         data-testid="snippet-toggle"
         className={`aya-statusbar-item aya-statusbar-button aya-pane-snippettoggle aya-statusbar-snippet ${

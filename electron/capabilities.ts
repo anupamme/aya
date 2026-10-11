@@ -214,6 +214,49 @@ export const AYA_CAPABILITIES: readonly Capability[] = [
     notes: ["Run it before aya team open, to propose installed presets for the roles."],
   },
   {
+    command: "machines",
+    usage: "aya machines [--json]",
+    summary:
+      "Show the user's Ollama machines, read-only: reachable or why not, GPU name, use and VRAM, CPU and RAM, each loaded model with how long it stays hot, and who claimed the machine.",
+    notes: [
+      "Read it before starting a timed run or choosing where a model runs: a hot model on a slower machine is not a fast alternative.",
+      "Aya never loads, unloads or calls a model; unloading one (keep_alive 0) needs the user's explicit yes every time.",
+    ],
+  },
+  {
+    command: "machines hosts",
+    usage: "aya machines hosts [--json]",
+    summary: "List the ssh hosts Aya knows (Host aliases in ~/.ssh/config, remote project targets) and which are added as machines.",
+  },
+  {
+    command: "machines add",
+    usage: 'aya machines add "sentence"',
+    summary:
+      "Propose machines in one sentence: known ssh hosts, user@host, and local or \"this machine\". Aya probes them read-only and asks the user in its own Add / Cancel dialog.",
+    example: 'aya machines add "athena is the 4090 box, and this machine"',
+    notes: [
+      "Only the user's click in Aya adds a machine; no flag or answer adds one from the command line.",
+      "\"port N\" right after a machine sets Ollama's port on it (11434 by default).",
+    ],
+  },
+  {
+    command: "machines remove",
+    usage: "aya machines remove id",
+    summary: "Remove a machine (asks in Aya); nothing on the machine changes.",
+  },
+  {
+    command: "machines claim",
+    usage: 'aya machines claim id "purpose" [--replace]',
+    summary: "Say you are using a machine and for what; Aya shows it in aya machines and in the machines popover of its status bar. Refused while someone else holds the claim.",
+    example: 'aya machines claim athena "run5 timed collection until 23:45"',
+    notes: ["Advisory: Ollama is not blocked. Never pass --replace without the user's yes."],
+  },
+  {
+    command: "machines release",
+    usage: "aya machines release id",
+    summary: "Clear a machine's claim when your work on it ends.",
+  },
+  {
     command: "capabilities",
     usage: "aya capabilities",
     summary: "Print this list as JSON.",

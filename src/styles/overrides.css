@@ -3117,3 +3117,96 @@ select.aya-modal-input {
   background: var(--accent, #4caf50);
   color: var(--bg-primary, #fff);
 }
+
+/* Machines: the status bar popover and Settings > Machines. */
+.aya-machine-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+}
+.aya-machine-dot--ok {
+  background: var(--status-active);
+}
+.aya-machine-dot--warn {
+  background: var(--status-waiting);
+}
+.aya-machine-dot--down {
+  background: var(--status-error);
+}
+.aya-statusbar-popover--machines {
+  width: min(460px, calc(100vw - 24px));
+  overflow-y: auto;
+  /* The status bar is not selectable; this popover is, so its facts can be copied into a pane or a note. */
+  user-select: text;
+}
+/* ...but not its buttons: "Manage", "Terminal" and "Release" stay out of what is copied. They share one font:
+   with font: inherit, Manage took the title's and the others the mono of the entries. */
+.aya-statusbar-popover--machines button {
+  user-select: none;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+}
+.aya-machines-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.aya-machines-entry {
+  display: grid;
+  gap: 3px;
+  padding: 9px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.aya-machines-entry + .aya-machines-entry {
+  border-top: 1px solid var(--border);
+}
+.aya-machines-entry-head {
+  color: var(--fg-primary);
+}
+.aya-machines-entry-head .aya-machine-dot {
+  vertical-align: middle;
+}
+.aya-machines-terminal {
+  float: right;
+  margin-left: 8px;
+}
+.aya-machines-state--warn {
+  color: var(--status-waiting);
+}
+.aya-machines-state--down,
+.aya-machines-error {
+  color: var(--status-error);
+}
+.aya-machines-muted {
+  color: var(--fg-tertiary);
+}
+.aya-machines-claim {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-primary);
+}
+.aya-machines-added {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.aya-machines-added-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.aya-machines-added-row .aya-modal-btn {
+  margin-left: auto;
+}
+.aya-machines-add {
+  margin-top: 12px;
+}

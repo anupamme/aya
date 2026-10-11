@@ -101,6 +101,8 @@ import { restartStaleHost, updateInstaller } from "./update-quit";
 import { notePathRepaired, presetInstalled } from "./command-probe";
 import type { TeamRunner } from "./team-runner";
 import { startRemoteServer } from "./remote-server";
+import { handleMachinesRequest, knownHosts, loadRegistry, machinesStatus } from "./machines";
+import { ayaMachinesDeps } from "./machines-dialog";
 import {
   createRemoteDirectory,
   createRemoteProjectOnHost,
@@ -2434,6 +2436,20 @@ function registerIpc(): TeamRunner {
   ipcMain.handle("remote:health", async (_e, sshTarget: unknown) =>
     checkRemoteHealth(requireString(sshTarget, "remote:health.sshTarget")),
   );
+  // The status bar and Settings > Machines: the same functions `aya machines` runs. A click in Aya is the user's
+  // own yes, so these adds and removes ask no dialog; only an agent's `aya machines add` does.
+  const machinesDeps = { ...ayaMachinesDeps(AYA_HOME, os.homedir(), () => null, () => listProjects()), confirmAdd: async () => true, confirmRemove: async () => true };
+  ipcMain.handle("machines:status", () => machinesStatus(machinesDeps));
+  ipcMain.handle("machines:setup", async () => {
+    const registry = await loadRegistry(machinesDeps);
+    return { machines: registry.machines, hosts: await knownHosts(machinesDeps, registry) };
+  });
+  ipcMain.handle("machines:command", async (_e, argv: unknown) => {
+    if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string") || !["add", "remove", "claim", "release"].includes(argv[0])) {
+      throw new Error("machines:command takes add, remove, claim or release with text arguments");
+    }
+    return (await handleMachinesRequest({ argv, user: os.userInfo().username }, machinesDeps)).output;
+  });
   ipcMain.handle(
     "remote:create-project",
     async (_e, sshTarget: unknown, directory: unknown, name: unknown) =>

@@ -33,6 +33,7 @@ export type {
 };
 
 import type { SplitNode } from "./split-tree";
+import type { KnownHost, Machine, MachineView } from "./machines";
 
 export interface WorkingTab {
   id: string;
@@ -50,6 +51,8 @@ export interface WorkingTab {
   sharedDir?: true;
   /** Opened for a team role: every launch gets a mode that reaches Aya. */
   teamLaunch?: boolean;
+  /** A tab opened on a machine from the machines popover: it runs `ssh -- <sshTarget>` instead of its preset's command. */
+  sshTarget?: string;
 }
 
 export interface SplitLayout {
@@ -610,6 +613,12 @@ export interface AyaApi {
   ): Promise<string>;
   listRemotePresets(sshTarget: string): Promise<Preset[]>;
   checkRemoteHealth(sshTarget: string): Promise<RemoteHealthResult>;
+  /** The status bar and Settings > Machines; the same functions as `aya machines`. */
+  machinesStatus(): Promise<{ version: number; machines: MachineView[] }>;
+  /** The added machines and the known ssh hosts, without probing any. */
+  machinesSetup(): Promise<{ machines: Machine[]; hosts: KnownHost[] }>;
+  /** `aya machines add | remove | claim | release`, as the user's own click: no dialog. */
+  machinesCommand(argv: string[]): Promise<string>;
   createRemoteProjectOnHost(
     sshTarget: string,
     directory: string,
