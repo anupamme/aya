@@ -57,6 +57,15 @@ function tomlString(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+/** Whether a notify line is ours: the line codexNotifyLine writes, give or take spaces and a trailing comment, and
+ *  nothing else. A line that merely contains the path (a user's wrapper given our script as an argument) is the
+ *  user's and is never claimed or removed; the raw path is not even in our line when it holds a backslash or a
+ *  quote, which is why a substring match also missed our own line there. */
+function namesOurScript(line: string, scriptPath: string): boolean {
+  const quoted = tomlString(scriptPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*notify\\s*=\\s*\\[\\s*${quoted}\\s*\\]\\s*(#.*)?$`).test(line);
+}
+
 /** The `notify = [...]` line we write. */
 export function codexNotifyLine(scriptPath: string): string {
   return `notify = [${tomlString(scriptPath)}]`;
@@ -79,7 +88,7 @@ export function findTopLevelNotify(toml: string): string | null {
 /** True when the top-level notify (if any) already points at `scriptPath`. */
 export function notifyIsOurs(toml: string, scriptPath: string): boolean {
   const line = findTopLevelNotify(toml);
-  return line !== null && line.includes(scriptPath);
+  return line !== null && namesOurScript(line, scriptPath);
 }
 
 export interface CodexNotifyMerge {
@@ -100,7 +109,7 @@ export function withCodexNotify(
 ): CodexNotifyMerge {
   const existing = findTopLevelNotify(toml);
   if (existing !== null) {
-    return existing.includes(scriptPath)
+    return namesOurScript(existing, scriptPath)
       ? { toml, installed: true, conflict: false }
       : { toml, installed: false, conflict: true };
   }
@@ -118,7 +127,7 @@ export function withoutCodexNotify(toml: string, scriptPath: string): string {
     const line = raw.trim();
     if (line.startsWith("[")) sawHeader = true;
     const isOurs =
-      !sawHeader && /^notify\s*=/.test(line) && raw.includes(scriptPath);
+      !sawHeader && /^notify\s*=/.test(line) && namesOurScript(raw, scriptPath);
     if (!isOurs) kept.push(raw);
   }
   return kept.join("\n");
@@ -170,7 +179,7 @@ export async function statusCodexHookStatus(): Promise<CodexStatusHookStatus> {
   const configPath = codexConfigPath();
   const toml = await readConfigToml();
   const topNotify = findTopLevelNotify(toml);
-  const ours = topNotify !== null && topNotify.includes(scriptPath);
+  const ours = topNotify !== null && namesOurScript(topNotify, scriptPath);
   const scriptExists = await pathExists(scriptPath);
   return {
     configured: ours && scriptExists,
