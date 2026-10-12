@@ -13,6 +13,7 @@ import {
   selectOrphanCandidates,
   sweepLegacyAyaProcesses,
   MAX_ORPHAN_PROBES,
+  readSnapshot,
 } from "../dist-electron/pty-host-sweep.js";
 import { AYA_DEV_HOME_DIRNAME, AYA_DEV_ON, AYA_DEV_VAR, AYA_HOME_DIRNAME } from "../dist-electron/paths.js";
 
@@ -338,6 +339,13 @@ test("sweep: empty snapshot or missing uid is a total no-op", () => {
     [],
   );
 });
+test("readSnapshot reads the real process table on this OS (procps on Linux refuses -Axo)", () => {
+  const self = readSnapshot().find((r) => r.pid === process.pid);
+  assert.ok(self, "this process is in the table, so ps ran and its output parsed");
+  assert.equal(self.uid, process.getuid());
+  assert.equal(self.ppid, process.ppid);
+});
+
 test("sweep S2: an orphan from another Aya's scope (dev build, an isolated AYA_HOME) is left to that Aya", () => {
   // The same check S1 makes for hosts: the scope in the orphan's env must be this Aya's own.
   const rows = [row({ pid: 300, pgid: 8888 }), row({ pid: 301, pgid: 8888 }), row({ pid: 302, pgid: 8888 })];
