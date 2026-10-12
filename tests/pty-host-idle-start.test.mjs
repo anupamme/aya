@@ -4,10 +4,10 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { connectWhenListening } from "./helpers/unix-socket.mjs";
 
 const HOST_SCRIPT = join(process.cwd(), "dist-electron", "pty-host.js");
 const IDLE_MS = 500;
@@ -59,9 +59,7 @@ describe("idle startup with isolated hosts", { concurrency: 4 }, () => {
     const sock = join(home, "pty-host.sock");
     const host = startHost(home, IDLE_MS * 2);
     try {
-      while (!existsSync(sock)) await new Promise((r) => setTimeout(r, 25));
-      const client = net.createConnection(sock);
-      await new Promise((r) => client.once("connect", r));
+      const client = await connectWhenListening(sock);
       await new Promise((r) => setTimeout(r, IDLE_MS * 3));
       assert.equal(host.exitCode, null, "a host with a client must stay up");
       client.destroy();
@@ -81,8 +79,8 @@ describe("idle startup with isolated hosts", { concurrency: 4 }, () => {
     try {
       while (!existsSync(sock)) await new Promise((r) => setTimeout(r, 25));
       await new Promise((r) => setTimeout(r, Math.max(0, idle * 0.6 - (Date.now() - startedAt))));
-      const client = net.createConnection(sock);
-      await new Promise((r) => client.once("connect", r));
+      // A host slower than the planned delay may have only just made the file.
+      const client = await connectWhenListening(sock);
       client.destroy();
       await new Promise((r) => setTimeout(r, idle * 0.6));
       assert.equal(host.exitCode, null, "the host exited on the timer armed before the client came");

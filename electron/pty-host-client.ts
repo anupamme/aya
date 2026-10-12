@@ -25,9 +25,9 @@ import { coalesceAdjacentData } from "./pty-event-coalescer";
 import type { BufferSearchHit } from "./pty";
 import type { PtyEvent, SpawnRequest } from "./types";
 
-// Deadline waiting for the pty host to create its socket (ms).
+// Deadline waiting for a started pty host to create its socket and accept on it (ms).
 export const PTY_HOST_SOCKET_WAIT_TIMEOUT_MS = 5_000;
-// Interval between socket-existence polls while waiting (ms).
+// Interval between connect attempts while waiting (ms).
 const PTY_HOST_SOCKET_POLL_INTERVAL_MS = 50;
 const DISPOSED_MESSAGE = "PTY host client is disposed";
 // holdReason when the terminal host cannot say; the message waits in the inbox.
@@ -312,8 +312,7 @@ export class PtyHostClient {
     } catch {
       if (this.disposed) throw new Error(DISPOSED_MESSAGE);
       this.startHost();
-      await this.waitForSocket();
-      await this.openSocket();
+      await this.openStartedHostSocket();
       this.reusedHost = false;
     }
   }
@@ -356,13 +355,24 @@ export class PtyHostClient {
     child.unref();
   }
 
-  private async waitForSocket(): Promise<void> {
+  /** Connects to a host just started, retrying until the deadline while its socket is missing
+   *  (ENOENT) or refuses: listen() creates the file at bind, a moment before it accepts, so a
+   *  connect in that moment is refused (seen on macOS CI). */
+  private async openStartedHostSocket(): Promise<void> {
     const deadline = Date.now() + PTY_HOST_SOCKET_WAIT_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (fs.existsSync(PTY_HOST_SOCKET_PATH)) return;
+    for (;;) {
+      try {
+        await this.openSocket();
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ECONNREFUSED" && code !== "ENOENT") throw err;
+        if (Date.now() >= deadline) {
+          throw code === "ENOENT" ? new Error(`PTY host did not create ${path.basename(PTY_HOST_SOCKET_PATH)}`) : err;
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, PTY_HOST_SOCKET_POLL_INTERVAL_MS));
     }
-    throw new Error(`PTY host did not create ${path.basename(PTY_HOST_SOCKET_PATH)}`);
   }
 
   private onData(chunk: string): void {
