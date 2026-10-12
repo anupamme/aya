@@ -10,6 +10,7 @@ import { digestLines, duration, parseRefused, roundDigest, type Digest } from ".
 import { formatStatusForStats, statusForStats } from "./team-status-command";
 import { clock, WALL_MINUTE_MS } from "./team-times";
 import type { TeamMessage } from "./types";
+import { printable } from "./printable";
 
 /** The team's files as text, null when absent. `debug` is debug.1.jsonl then debug.jsonl. */
 export interface TeamFiles {
@@ -340,9 +341,12 @@ if (require.main === module) {
   const status = statusForStats(savedStatusCommand(team, files.saved), files.status ?? null);
   const statusBlock = status ? formatStatusForStats(status) : "";
   // --now is the lead's round, and the round ends with the status command's output.
-  if (flag === "--now") process.stdout.write(digestLines(digestFromFiles(team, files, Date.now())) + statusBlock);
-  else {
-    const stats = teamStats(team, files, Date.now());
-    process.stdout.write(flag === "--json" ? `${JSON.stringify({ ...stats, statusCommand: status }, null, 2)}\n` : formatStats(stats) + statusBlock);
-  }
+  const out =
+    flag === "--now"
+      ? digestLines(digestFromFiles(team, files, Date.now())) + statusBlock
+      : flag === "--json"
+        ? `${JSON.stringify({ ...teamStats(team, files, Date.now()), statusCommand: status }, null, 2)}\n`
+        : formatStats(teamStats(team, files, Date.now())) + statusBlock;
+  // Not through the control socket, so not through its reply (control.ts printableReply): the same rule here.
+  process.stdout.write(printable(out));
 }

@@ -356,6 +356,35 @@ test("aya team stats <team> [--json]: the real CLI on a temp AYA_HOME, read-only
   assert.equal(readFileSync(logFile, "utf8"), before, "nothing written");
 });
 
+test("aya team stats prints the status command and its recorded output as text, in every form", () => {
+  // The command comes from the team file and the output from what the command printed: neither may act on a terminal.
+  const command = "git log\x1b]0;owned\x07 -1";
+  const output = "abc1234 fix\u009b31m red\u202eTXT";
+  const fixture = (dir) => {
+    writeFileSync(join(dir, TEAM_FILES.saved), `${SAVED}\n## Status command\n${command}\n`);
+    writeFileSync(join(dir, TEAM_FILES.status), JSON.stringify({ command, ranAt: at(3), output, failure: "exit 1\x1b[2J" }));
+    // What the counts and the round's digest quote: a hold reason from a pane, a refused send's role, reason and text.
+    writeFileSync(join(dir, DEBUG_LOG_FILE), jsonl([ev(4, "hold", { to: "lead", id: 1, reason: "shows\u009b31m a prompt", typed: false })]));
+    writeFileSync(join(dir, TEAM_FILES.refused), jsonl([{ time: new Date(Date.now() - 5 * MINUTE_MS).toISOString(), from: "tester", to: "nobody\u009bX", reason: "no such role\u202eR", text: "hi\x1b[2J there" }]));
+  };
+  const h = teamHome([["game", "crew", fixture]]);
+  const UNPRINTABLE = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u206f]/;
+  for (const flag of [[], ["--now"]]) {
+    const r = runCli(h, ["team", "stats", "crew", ...flag]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, UNPRINTABLE, flag.join(" ") || "plain");
+    assert.match(r.stdout, /command: git log\\u001b\]0;owned\\u0007 -1$/m);
+    assert.match(r.stdout, /^  abc1234 fix\\u009b31m red\\u202eTXT$/m);
+    assert.match(r.stdout, /^  exit 1\\u001b\[2J$/m);
+    if (flag.length) assert.match(r.stdout, /^Refused sends: tester -> "nobody\\u009bX" \(no such role\\u202eR\): "hi\\u001b\[2J there"$/m);
+    else assert.match(r.stdout, /^ +1 {2}shows\\u009b31m a prompt$/m);
+  }
+  const r = runCli(h, ["team", "stats", "crew", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, UNPRINTABLE, "--json");
+  assert.deepEqual(JSON.parse(r.stdout).statusCommand, { command, ranAt: at(3), output, failure: "exit 1\x1b[2J" });
+});
+
 test("aya team stats: no such team, a team in two projects, a bad flag", () => {
   const saved = (dir) => writeFileSync(join(dir, TEAM_FILES.saved), SAVED);
   // A directory with no saved copy (a removed team's late debug line) is not a project of the team.
