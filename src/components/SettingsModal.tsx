@@ -31,7 +31,7 @@ import type { MacOptionKeyMode } from "../terminal-option-key";
 import type { TerminalSoundCue } from "../terminal-sound-prefs";
 import { closeFromBackdropClick, markBackdropMouseDown } from "./modal-backdrop";
 import { HOOK_THROTTLE_MINUTES } from "../main-mirrors";
-import { webHostOptions } from "../web-host-options";
+import { allNetworksWarning, WEB_LOOPBACK_HOST, webHostOptions } from "../web-host-options";
 
 const DEFAULT_CLAUDE_CONFIG_DIR = "~/.claude";
 const DEFAULT_CODEX_CONFIG_DIR = "~/.codex";
@@ -1533,9 +1533,9 @@ export function SettingsModal({
             )}
           >
             Use Aya from a browser, behind a user and password. Signing in
-            gives full shell access to this machine. It listens on this
-            computer only: from another one, use an SSH tunnel, or choose a
-            network below. There is no TLS, so on a network the password and
+            gives full shell access to this machine. A new setup listens on
+            this computer only: from another one, use an SSH tunnel, or choose
+            a network below. There is no TLS, so on a network the password and
             your terminals travel unencrypted; choose only one you trust
             (Tailscale, WireGuard or your own LAN).
             {(ayaWebError ?? ayaWeb?.error) && (
@@ -1562,6 +1562,20 @@ export function SettingsModal({
                   ))}
                 </select>
               </label>
+            )}
+            {/* role=status: read out when it appears after a change, not on every open of Settings. */}
+            {ayaWeb && allNetworksWarning(ayaWeb) && (
+              <div role="status" style={{ marginTop: 6 }}>
+                <strong>Warning:</strong> {allNetworksWarning(ayaWeb)}{" "}
+                <button
+                  className="aya-modal-btn"
+                  type="button"
+                  disabled={ayaWebBusy}
+                  onClick={() => void applyAyaWeb({ host: WEB_LOOPBACK_HOST })}
+                >
+                  This computer only
+                </button>
+              </div>
             )}
             {ayaWeb?.enabled && (
               <div

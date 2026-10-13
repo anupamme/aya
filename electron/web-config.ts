@@ -21,13 +21,20 @@ export const DEFAULT_WEB_PORT = 7683;
 export const IPV4_WILDCARD_HOST = "0.0.0.0";
 export const IPV6_WILDCARD_HOST = "::";
 export const LOOPBACK_HOST = "127.0.0.1";
-// This computer only: there is no TLS, so the password and the session cookie would cross any other network in
-// plain text. Every network, or one interface such as Tailscale, is the user's choice in Settings.
+// This computer only, for a new setup: there is no TLS, so the password and the session cookie would cross any
+// other network in plain text. Every network, or one interface such as Tailscale, is the user's choice in Settings.
+// A saved web.json keeps its address, 0.0.0.0 included: people reach Aya Web from other devices every day, and
+// moving them to loopback after an update would cut them off. Settings warns while it listens on every network.
 export const DEFAULT_WEB_HOST = LOOPBACK_HOST;
 
-/** True for a listen address that binds every interface (IPv4 or IPv6). */
+/** True for a listen address that binds every interface (IPv4 or IPv6), in any spelling: IPv6 is compared in the
+ *  form the URL parser writes, so 0:0:0:0:0:0:0:0 is ::, and ::ffff:0:0 is 0.0.0.0 mapped into IPv6. Mirrors
+ *  listensOnAllNetworks in src/web-host-options.ts, which drives the Settings warning. */
 export function isWildcardHost(host: string): boolean {
-  return host === IPV4_WILDCARD_HOST || host === IPV6_WILDCARD_HOST;
+  if (host === IPV4_WILDCARD_HOST) return true;
+  if (!net.isIPv6(host)) return false;
+  const canonical = new URL(`http://[${host}]`).hostname;
+  return canonical === `[${IPV6_WILDCARD_HOST}]` || canonical === "[::ffff:0:0]";
 }
 
 /** True for an address only this computer can reach: 127/8, ::1, and 127/8 mapped into IPv6 (::ffff:127.0.0.1,
@@ -91,12 +98,9 @@ export const MAX_TCP_PORT = 65535;
 export interface WebConfig {
   enabled: boolean;
   port: number;
-  /** Listen address: 127.0.0.1 by default, 0.0.0.0 for every interface, or one interface address such as
+  /** Listen address: 127.0.0.1 for a new setup, 0.0.0.0 for every interface, or one interface address such as
    *  Tailscale's. */
   host: string;
-  /** True once the user picked the address in Settings. Configs written before the loopback default saved 0.0.0.0
-   *  without anyone choosing it; see normalizeWebConfig. */
-  hostChosen?: boolean;
   user: string;
   passwordHash: string; // scrypt, hex
   passwordSalt: string; // hex
@@ -180,18 +184,11 @@ export function normalizeWebConfig(raw: unknown): WebConfig | null {
     typeof r.user === "string" && r.user.trim()
       ? r.user.trim()
       : defaultWebUser();
-  const enabled = r.enabled === true;
-  const hostChosen = r.hostChosen === true;
-  let host =
-    typeof r.host === "string" && r.host.trim() ? r.host.trim() : DEFAULT_WEB_HOST;
-  // Before the loopback default every config saved 0.0.0.0 on first run. One that is off and whose address nobody
-  // picked moves to this computer only; one that is on keeps serving where its user reaches it today.
-  if (!enabled && !hostChosen && host === IPV4_WILDCARD_HOST) host = DEFAULT_WEB_HOST;
   return {
-    enabled,
+    enabled: r.enabled === true,
     port: normalizeWebPort(r.port),
-    host,
-    ...(hostChosen ? { hostChosen } : {}),
+    host:
+      typeof r.host === "string" && r.host.trim() ? r.host.trim() : DEFAULT_WEB_HOST,
     user,
     passwordHash: r.passwordHash,
     passwordSalt: r.passwordSalt,
