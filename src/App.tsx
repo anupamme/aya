@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { resumeSpawn, sharingPaneIds } from "./agentPreset";
-import { gitContextCwd, projectBaseCwd, tabFromTerminal } from "./worktree";
+import { sharingPaneIds } from "./agentPreset";
+import { projectBaseCwd, tabFromTerminal } from "./worktree";
 import { findStatusTarget } from "./control-status-target";
 import {
   applyReportedStatus,
@@ -13,6 +13,26 @@ import {
   applyExternalProjectEdits,
   mergeProjectsFromDisk,
 } from "./project-reload";
+import {
+  compactRecord,
+  dedupeSlugs,
+  defaultTabName,
+  findProject,
+  findProjectSlugForSession,
+  mergeGitInfo,
+  remoteTerminalCommand,
+  samePollPayload,
+  sameProjectBadges,
+  sameSessionRecords,
+  sessionDir,
+  terminalSpawn,
+  uniquePresetId,
+  uniqueProjectName,
+  type MissingDirEntry,
+  type NewProjectModalState,
+  type PendingRepoImport,
+} from "./project-helpers";
+import { SplitResizeHandle } from "./components/SplitResizeHandle";
 import { AttentionCenter } from "./components/AttentionCenter";
 import { TeamsModal } from "./components/TeamsModal";
 import { TeamAssignPrompt } from "./components/TeamRole";
@@ -37,10 +57,12 @@ import { useAppShortcuts } from "./hooks/useAppShortcuts";
 import { useDoubleShiftSearch } from "./hooks/useDoubleShiftSearch";
 import { usePtyEventRouter } from "./hooks/usePtyEventRouter";
 import { useStable } from "./hooks/useStableIdentity";
-import { sameArrayItems, sameRecordValues } from "./stable-identity";
-import { paletteToChromeVars, paletteToThemeColors } from "./theme-skin";
-import { localSummaryUnavailableMessage } from "./local-summary-errors";
-import { LOCAL_SUMMARY_MAX_LINES, PROJECT_STATE_VERSION } from "./main-mirrors";
+import { sameArrayItems } from "./stable-identity";
+import { useAppTheme } from "./hooks/useAppTheme";
+import { useConfigReload } from "./hooks/useConfigReload";
+import { EMPTY_SUMMARIES } from "./local-summaries";
+import { useLocalSummaries, useLocalSummaryEffects } from "./hooks/useLocalSummaries";
+import { PROJECT_STATE_VERSION } from "./main-mirrors";
 import type { SettingsTab } from "./settings-tabs";
 import {
   useDockBadge,
@@ -49,17 +71,17 @@ import {
 } from "./hooks/useTerminalSignals";
 import { useTerminalSounds } from "./hooks/useTerminalSounds";
 import { useTeams } from "./hooks/useTeams";
-import { OLLAMA_OPENAI_BASE_URL, RECOMMENDED_OLLAMA_MODEL } from "./ollama-defaults";
+import { useHarnessScan, useUsagePolling } from "./hooks/useUsagePolling";
+import { useWindowChrome } from "./hooks/useWindowChrome";
+import { pollVisible } from "./poll-visible";
+import { useGitHubLinkEffect, useGitStatus } from "./hooks/useGitStatus";
 import { PRESET_ID_SHELL } from "./preset-ids";
 import {
   APP_THEME_STORAGE_KEY,
-  AYA_INTELLIGENCE_STORAGE_KEY,
   CUSTOM_DONE_SOUND_STORAGE_KEY,
   CUSTOM_WAITING_SOUND_STORAGE_KEY,
   HARNESS_SEARCH_STORAGE_KEY,
   LAYOUT_MODE_STORAGE_KEY,
-  LOCAL_SUMMARIES_STORAGE_KEY,
-  LOCAL_SUMMARY_CACHE_STORAGE_KEY,
   MAC_OPTION_KEY_STORAGE_KEY,
   NO_HARNESS_HINT_DISMISSED_STORAGE_KEY,
   SOUND_OVERRIDES_STORAGE_KEY,
@@ -73,7 +95,6 @@ import {
 } from "./storage-keys";
 import { GPU_RELAUNCHED_EVENT } from "./window-events";
 import { uuid } from "./uuid";
-import { GIT_STATUS_POLL_INTERVAL_MS } from "./ui-timing";
 import { normalizeSoundOverrides } from "./terminal-sound-prefs";
 import { SCREEN_WAITING_DETAIL } from "./attention";
 import {
@@ -91,8 +112,8 @@ import {
   removeTerminal,
   resizeSplit as resizeSplitNode,
   splitLeaf,
-  treeFromLegacyLayout,
-  type DividerRect,
+  projectSplitTree,
+  resolveActiveLeafId,
   type SplitNode,
 } from "./split-tree";
 import {
@@ -102,130 +123,49 @@ import {
   type PreferenceCodec,
 } from "./hooks/usePersistentPreference";
 import { waitingPanesOf } from "./team-view";
-import { projectBadgeLevel, type ProjectBadgeLevel } from "./attention";
+import { calculateProjectBadges } from "./project-badges";
+import {
+  calculateTerminalLists,
+  calculateVisibleTerminalIds,
+} from "./terminal-visibility";
 import {
   BUILTIN_SHELL,
   WAITING_ON,
-  type AyaIntelligenceConfig,
   type Snippet,
   getPreset,
-  type GitHubLink,
   type LayoutMode,
   type ProjectEvent,
-  type MonitoredSession,
   type Preset,
   type PtyEvent,
-  presetSlug,
-  slugifyName,
   type ProjectCollectionState,
   type ProjectConfig,
-  type ProjectGitInfo,
   type RemoteProjectCreateResult,
-  type SpawnCommand,
   type TerminalState,
   type WaitingPanes,
   type Theme,
   type ThemeColors,
-  type UsageAccount,
-  type GrokUsage,
   type WorkingTab,
-  type Worktree,
-  type WorktreeStatus,
 } from "./types";
 
-// Cadence for re-reading the account-wide usage snapshot a user hook writes.
-const USAGE_POLL_INTERVAL_MS = 30_000;
 // Cap on retained entries in the project event timeline.
 const MAX_PROJECT_EVENTS = 200;
 // Cap on preset suggestions offered during repo preset import.
 const MAX_SUGGESTED_PRESETS = 8;
 const DEFAULT_SIDEBAR_WIDTH_PX = 240;
 const DEFAULT_RAIL_WIDTH_PX = 220;
-// Stable empty map handed to chrome when summaries are off, so the prop doesn't
-// change identity every render (a fresh `{}` would defeat child memoization).
-const EMPTY_SUMMARIES: Record<string, string> = {};
 
-// Run `refresh` now, then on an interval — but skip ticks while the window is
-// hidden (no point spawning `git`, re-reading session/usage files in the
-// background), and refresh once immediately when it becomes visible again.
-// Returns a cleanup that stops the interval and removes the listener.
-function pollVisible(refresh: () => void, intervalMs: number): () => void {
-  refresh();
-  const id = window.setInterval(() => {
-    if (!document.hidden) refresh();
-  }, intervalMs);
-  const onVisible = () => {
-    if (!document.hidden) refresh();
-  };
-  document.addEventListener("visibilitychange", onVisible);
-  return () => {
-    window.clearInterval(id);
-    document.removeEventListener("visibilitychange", onVisible);
-  };
-}
 const TERMINAL_FONT_SIZE_PX = 13;
 /** Leaf id for the synthetic one-pane tree used when a project has no stored
  *  split (or is showing a single terminal). Constant so React keys and focus
  *  stay stable across renders. */
 const SINGLE_VIEW_LEAF_ID = "single";
 const WARM_PROJECT_TERMINAL_CACHE_SIZE = 4;
-const LOCAL_SUMMARY_REFRESH_MS = 30 * 60 * 1000;
-const LOCAL_SUMMARY_DEBOUNCE_MS = 10_000;
 // Debounce for the single project-state disk writer (the #18 race fix).
 const PROJECT_STATE_SAVE_DEBOUNCE_MS = 150;
-const LOCAL_SUMMARY_MIN_UPDATE_MS = 2 * 60 * 1000;
-const LOCAL_SUMMARY_MIN_NEW_LINES = 8;
-// Fewer output lines than this are "not enough output" to summarize.
-const LOCAL_SUMMARY_MIN_LINES = 2;
-// Cleaned output lines shorter than this (prompts, stray glyphs) are dropped.
-const LOCAL_SUMMARY_MIN_LINE_CHARS = 3;
-const LOCAL_SUMMARY_BUFFER_LINES = 80;
-const LOCAL_SUMMARY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const SESSION_MONITOR_POLL_INTERVAL_MS = 5_000;
 
 type AppThemePreference = "system" | "light" | "dark" | "omarchy";
 
-const DEFAULT_AYA_INTELLIGENCE: AyaIntelligenceConfig = {
-  provider: "apple",
-  ollamaModel: RECOMMENDED_OLLAMA_MODEL,
-  openAiBaseUrl: OLLAMA_OPENAI_BASE_URL,
-  openAiApiKey: "",
-  openAiModel: RECOMMENDED_OLLAMA_MODEL,
-};
 
-interface AutoSummaryStatus {
-  terminalCount: number;
-  terminalsWithLines: number;
-  totalLines: number;
-  lastEvent: string;
-}
-
-
-// Content comparators for useStable: badge/session records are rebuilt with
-// fresh value objects on every terminals-map change, so identity alone can't
-// tell "same badges" from "changed badges".
-function sameProjectBadges(
-  a: Record<string, { count: number; level: ProjectBadgeLevel }>,
-  b: Record<string, { count: number; level: ProjectBadgeLevel }>,
-): boolean {
-  return sameRecordValues(
-    a,
-    b,
-    (x, y) => x.count === y.count && x.level === y.level,
-  );
-}
-
-function sameSessionRecords(
-  a: Record<string, MonitoredSession[]>,
-  b: Record<string, MonitoredSession[]>,
-): boolean {
-  return sameRecordValues(a, b, sameArrayItems);
-}
-
-interface SummaryCache {
-  terminal: Record<string, { summary: string; updatedAt: number }>;
-  project: Record<string, { summary: string; updatedAt: number }>;
-}
 
 // localStorage codecs for the simple preferences (see usePersistentPreference).
 const THEME_CODEC = enumPreference<AppThemePreference>(
@@ -246,7 +186,6 @@ const LAYOUT_CODEC = enumPreference<LayoutMode>(
 // Harness names show by default; the PR/branch link is opt-in (needs gh).
 const HARNESS_NAME_CODEC = boolPreference(true);
 const GITHUB_LINK_CODEC = boolPreference(false);
-const LOCAL_SUMMARIES_CODEC = boolPreference(false);
 // Experimental: git worktree support (detect + group + launch/create in worktrees).
 const WORKTREES_CODEC = boolPreference(false);
 // Experimental: Cmd+F "History" mode searching Claude/Codex session
@@ -288,409 +227,6 @@ function readTerminalFontFamily(): string {
   return localStorage.getItem(TERMINAL_FONT_FAMILY_STORAGE_KEY) ?? "";
 }
 
-function readSummaryCache(): SummaryCache {
-  try {
-    const raw = localStorage.getItem(LOCAL_SUMMARY_CACHE_STORAGE_KEY);
-    if (!raw) return { terminal: {}, project: {} };
-    const parsed = JSON.parse(raw) as Partial<SummaryCache>;
-    const now = Date.now();
-    const normalize = (
-      input: unknown,
-    ): Record<string, { summary: string; updatedAt: number }> => {
-      if (typeof input !== "object" || input === null || Array.isArray(input)) {
-        return {};
-      }
-      const out: Record<string, { summary: string; updatedAt: number }> = {};
-      for (const [key, value] of Object.entries(input)) {
-        if (
-          typeof value !== "object" ||
-          value === null ||
-          Array.isArray(value)
-        ) {
-          continue;
-        }
-        const entry = value as Record<string, unknown>;
-        if (
-          typeof entry.summary !== "string" ||
-          !entry.summary.trim() ||
-          typeof entry.updatedAt !== "number" ||
-          now - entry.updatedAt > LOCAL_SUMMARY_CACHE_MAX_AGE_MS
-        ) {
-          continue;
-        }
-        out[key] = { summary: entry.summary.trim(), updatedAt: entry.updatedAt };
-      }
-      return out;
-    };
-    return {
-      terminal: normalize(parsed.terminal),
-      project: normalize(parsed.project),
-    };
-  } catch {
-    return { terminal: {}, project: {} };
-  }
-}
-
-function summariesFromCache(
-  cache: SummaryCache,
-  kind: "terminal" | "project",
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(cache[kind]).map(([key, value]) => [key, value.summary]),
-  );
-}
-
-function readAyaIntelligenceConfig(): AyaIntelligenceConfig {
-  try {
-    const raw = localStorage.getItem(AYA_INTELLIGENCE_STORAGE_KEY);
-    if (!raw) return DEFAULT_AYA_INTELLIGENCE;
-    const parsed = JSON.parse(raw) as Partial<AyaIntelligenceConfig>;
-    return {
-      provider:
-        parsed.provider === "ollama" || parsed.provider === "openai"
-          ? parsed.provider
-          : "apple",
-      ollamaModel:
-        typeof parsed.ollamaModel === "string" && parsed.ollamaModel.trim()
-          ? parsed.ollamaModel.trim()
-          : DEFAULT_AYA_INTELLIGENCE.ollamaModel,
-      openAiBaseUrl:
-        typeof parsed.openAiBaseUrl === "string"
-          ? parsed.openAiBaseUrl
-          : DEFAULT_AYA_INTELLIGENCE.openAiBaseUrl,
-      openAiApiKey:
-        typeof parsed.openAiApiKey === "string" ? parsed.openAiApiKey : "",
-      openAiModel:
-        typeof parsed.openAiModel === "string" && parsed.openAiModel.trim()
-          ? parsed.openAiModel.trim()
-          : DEFAULT_AYA_INTELLIGENCE.openAiModel,
-    };
-  } catch {
-    return DEFAULT_AYA_INTELLIGENCE;
-  }
-}
-
-function cleanTerminalOutput(chunk: string): string[] {
-  return chunk
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1b[@-Z\\-_]/g, "")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((line) =>
-      line
-        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
-        .replace(/\s+/g, " ")
-        .trim(),
-    )
-    .filter((line) => line.length >= LOCAL_SUMMARY_MIN_LINE_CHARS);
-}
-
-function summaryHash(lines: string[]): string {
-  let hash = 2166136261;
-  for (const line of lines) {
-    for (let i = 0; i < line.length; i += 1) {
-      hash ^= line.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-  }
-  return String(hash >>> 0);
-}
-
-// Hard fallback used only if the themes file is somehow empty before boot
-// resolves — matches AYA_DARK in electron/themes.ts.
-const FALLBACK_THEME_COLORS: ThemeColors = {
-  background: "#0d1117",
-  foreground: "#c9d1d9",
-  cursor: "#c9d1d9",
-  cursorAccent: "#0d1117",
-  selectionBackground: "rgba(88,166,255,0.3)",
-  black: "#484f58",
-  red: "#ff7b72",
-  green: "#56d364",
-  yellow: "#e3b341",
-  blue: "#79c0ff",
-  magenta: "#d2a8ff",
-  cyan: "#39c5cf",
-  white: "#b1bac4",
-  brightBlack: "#6e7681",
-  brightRed: "#ffa198",
-  brightGreen: "#7ee787",
-  brightYellow: "#f0ad4e",
-  brightBlue: "#a5d6ff",
-  brightMagenta: "#ffa657",
-  brightCyan: "#56d4dd",
-  brightWhite: "#f0f6fc",
-};
-
-function dedupeSlugs(slugs: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const slug of slugs) {
-    if (seen.has(slug)) continue;
-    seen.add(slug);
-    out.push(slug);
-  }
-  return out;
-}
-
-/** Drop null/undefined values so the persisted selection map only has live ids. */
-function compactRecord(
-  record: Record<string, string | null>,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (value) out[key] = value;
-  }
-  return out;
-}
-
-interface GitInfo {
-  branch: string | null;
-  dirty: number;
-}
-
-interface NewProjectModalState {
-  defaults?: { directory?: string };
-  lockDirectory?: boolean;
-  title?: string;
-  hint?: string;
-  pathHint?: string;
-}
-
-interface MissingDirEntry {
-  slug: string;
-  name: string;
-  directory: string;
-}
-
-interface PendingRepoImport {
-  project: ProjectConfig;
-  presets: Preset[];
-}
-
-function findProject(
-  projects: ProjectConfig[],
-  slug: string,
-): ProjectConfig | null {
-  return projects.find((p) => p.slug === slug) ?? null;
-}
-
-function basename(p: string): string {
-  const parts = p.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || "project";
-}
-
-/** Keep the previous poll-state reference when the fresh result is
- *  value-identical. The polls (git 3s, sessions 5s, usage 30s) hand back fresh
- *  objects every tick; without this every tick re-renders App AND breaks
- *  React.memo on the chrome components by changing prop identities. Poll
- *  payloads are small, so a JSON compare is cheap. */
-function samePollPayload<T>(prev: T, next: T): boolean {
-  return JSON.stringify(prev) === JSON.stringify(next);
-}
-
-/** setGit updater that no-ops (same reference back) when that directory's git
- *  info is unchanged — the common case for the 3s status-bar poll. Keyed by
- *  directory, not project slug: a worktree tab reads its OWN checkout, so one
- *  project can hold several entries and switching tabs must not show the
- *  previous checkout's branch until the next poll lands. */
-function mergeGitInfo(
-  g: Record<string, ProjectGitInfo>,
-  directory: string,
-  info: ProjectGitInfo,
-): Record<string, ProjectGitInfo> {
-  const cur = g[directory];
-  return cur && cur.branch === info.branch && cur.dirty === info.dirty
-    ? g
-    : { ...g, [directory]: info };
-}
-
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
-function remoteTerminalCommand(project: ProjectConfig, preset: Preset): string {
-  if (!project.remote) return preset.command;
-  const remoteShell = '"${SHELL:-/bin/sh}"';
-  const remoteCommand =
-    preset.id === PRESET_ID_SHELL || preset.command.trim() === "$SHELL"
-      ? `cd ${shellQuote(project.remote.directory)} && exec ${remoteShell} -l`
-      : `cd ${shellQuote(project.remote.directory)} && exec ${remoteShell} -l -i -c ${shellQuote(`exec ${preset.command}`)}`;
-  return `ssh -tt ${shellQuote(project.remote.sshTarget)} ${shellQuote(remoteCommand)}`;
-}
-
-/** Where a terminal's agent keeps its sessions: its cwd, or the remote directory. */
-function sessionDir(project: ProjectConfig | null, terminal: TerminalState): string {
-  return project?.remote
-    ? `${project.remote.sshTarget}:${project.remote.directory}`
-    : terminal.cwd;
-}
-
-function terminalSpawn(
-  project: ProjectConfig | null,
-  preset: Preset,
-  terminal: TerminalState,
-  panes: Array<{ id: string; preset: Preset; cwd: string }>,
-  homeDir: string,
-): SpawnCommand {
-  // A tab opened on a machine runs ssh here, never wrapped for a remote project and never resumed.
-  if (terminal.sshTarget) return { command: `ssh -- ${shellQuote(terminal.sshTarget)}` };
-  const key = sessionDir(project, terminal);
-  const spawn = resumeSpawn(
-    preset,
-    { id: terminal.id, cwd: key, restored: terminal.restored, sessionId: terminal.sessionId, sharedDir: terminal.sharedDir },
-    panes,
-  );
-  const wrap = (command: string) => (project ? remoteTerminalCommand(project, { ...preset, command }) : command);
-  // A remote pane runs in the home dir here; its peers share the folder when their key is the same.
-  const peerCwds = project?.remote
-    ? spawn.peerCwds?.includes(key) ? [homeDir] : undefined
-    : spawn.peerCwds;
-  return {
-    command: wrap(spawn.command),
-    ...(spawn.sharedDirCommand && peerCwds
-      ? { sharedDirCommand: wrap(spawn.sharedDirCommand), peerCwds }
-      : {}),
-  };
-}
-
-function uniqueProjectName(projects: ProjectConfig[], directory: string): string {
-  const base = basename(directory);
-  const used = new Set(projects.map((p) => p.slug));
-  const root = base || "project";
-  let name = root;
-  let idx = 2;
-  // Main's "project" fallback, so this predicts the slug createProject assigns.
-  while (used.has(slugifyName(name, "project"))) {
-    name = `${root} ${idx}`;
-    idx += 1;
-  }
-  return name;
-}
-
-function uniquePresetId(existing: Preset[], project: ProjectConfig, preset: Preset): string {
-  const used = new Set(existing.map((p) => p.id));
-  const root = presetSlug(`${project.slug}-${preset.id || preset.name}`);
-  let candidate = root;
-  let idx = 2;
-  while (used.has(candidate)) {
-    candidate = `${root}-${idx}`;
-    idx += 1;
-  }
-  return candidate;
-}
-
-/** A project's pane layout, migrating the pre-tree grid format on the fly.
- *  Migration lives here (not in the main process) so the conversion has exactly
- *  one tested implementation — see src/split-tree.ts treeFromLegacyLayout. The
- *  next save writes `splitTree` and drops `splitLayout`. */
-function projectSplitTree(project: ProjectConfig): SplitNode | undefined {
-  if (project.splitTree) return project.splitTree;
-  if (project.splitLayout) return treeFromLegacyLayout(project.splitLayout);
-  return undefined;
-}
-
-/** Which pane is focused. A remembered id wins while it still exists;
- *  otherwise the pane holding the active terminal, else the first pane — so
- *  focus never dangles after a pane is closed or collapsed. */
-function resolveActiveLeafId(
-  tree: SplitNode,
-  remembered: string | undefined,
-  activeTerminalId: string | null,
-): string {
-  const all = leaves(tree);
-  if (remembered && all.some((l) => l.id === remembered)) return remembered;
-  if (activeTerminalId) {
-    const holding = all.find((l) => l.terminalId === activeTerminalId);
-    if (holding) return holding.id;
-  }
-  return all[0].id;
-}
-
-/** Geometry lives in src/split-tree.ts; App only wires it to state.
- *  A divider is dragged in pixels and converted to a ratio against the area
- *  ITS split governs — measuring against the whole container would make a
- *  divider nested inside a half-width pane move at twice the pointer's speed. */
-function SplitResizeHandle({
-  divider,
-  onResize,
-}: {
-  divider: DividerRect;
-  onResize: (ratio: number) => void;
-}) {
-  const vertical = divider.direction === "row";
-  return (
-    <div
-      className={`aya-split-resize aya-split-resize--${vertical ? "col" : "row"}`}
-      style={{
-        left: `${divider.rect.left}%`,
-        top: `${divider.rect.top}%`,
-        ...(vertical
-          ? { height: `${divider.rect.height}%` }
-          : { width: `${divider.rect.width}%` }),
-      }}
-      onMouseDown={(event) => {
-        event.preventDefault();
-        const host = event.currentTarget.parentElement;
-        if (!host) return;
-        const hostRect = host.getBoundingClientRect();
-        const { bounds } = divider;
-        const spanPx = vertical
-          ? (hostRect.width * bounds.width) / 100
-          : (hostRect.height * bounds.height) / 100;
-        const originPx = vertical
-          ? hostRect.left + (hostRect.width * bounds.left) / 100
-          : hostRect.top + (hostRect.height * bounds.top) / 100;
-        if (spanPx <= 0) return;
-        const move = (moveEvent: MouseEvent) => {
-          const pointer = vertical ? moveEvent.clientX : moveEvent.clientY;
-          onResize((pointer - originPx) / spanPx);
-        };
-        const up = () => {
-          window.removeEventListener("mousemove", move);
-          window.removeEventListener("mouseup", up);
-          document.body.style.cursor = "";
-        };
-        document.body.style.cursor = vertical ? "col-resize" : "row-resize";
-        window.addEventListener("mousemove", move);
-        window.addEventListener("mouseup", up);
-      }}
-    />
-  );
-}
-
-/** Default display name for a freshly-created tab. Uses the preset's name
- *  so renaming a preset in Settings shows up on the next launch. */
-function defaultTabName(preset: Preset): string {
-  return preset.name.trim() || preset.id || "terminal";
-}
-
-function normalizeLocalPath(value: string): string {
-  if (value.length > 1) return value.replace(/\/+$/, "");
-  return value;
-}
-
-function pathContainsProject(pathname: string, projectDirectory: string): boolean {
-  const cwd = normalizeLocalPath(pathname);
-  const directory = normalizeLocalPath(projectDirectory);
-  return cwd === directory || cwd.startsWith(directory + "/");
-}
-
-function findProjectSlugForSession(
-  session: MonitoredSession,
-  projects: ProjectConfig[],
-): string | null {
-  let best: ProjectConfig | null = null;
-  for (const project of projects) {
-    if (project.remote) continue;
-    if (!pathContainsProject(session.cwd, project.directory)) continue;
-    if (!best || project.directory.length > best.directory.length) {
-      best = project;
-    }
-  }
-  return best?.slug ?? null;
-}
 
 export function App() {
   const [allProjects, setAllProjects] = useState<ProjectConfig[]>([]);
@@ -709,12 +245,6 @@ export function App() {
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [themes, setThemes] = useState<Theme[]>([]);
   const [activeThemeId, setActiveThemeId] = useState<string>("");
-  // Terminal colors from the active skin (Omarchy), or null when no skin is on.
-  // Takes precedence over the selected terminal theme, below the per-tab
-  // override.
-  const [skinThemeColors, setSkinThemeColors] = useState<ThemeColors | null>(
-    null,
-  );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [warmProjectSlugs, setWarmProjectSlugs] = useState<string[]>([]);
   const [terminals, setTerminals] = useState<Record<string, TerminalState>>({});
@@ -737,15 +267,6 @@ export function App() {
   const [closeFocusHold, setCloseFocusHold] = useState<
     { slug: string; terminalId: string } | null
   >(null);
-  const [git, setGit] = useState<Record<string, GitInfo>>({});
-  const [githubLinks, setGithubLinks] = useState<
-    Record<string, GitHubLink | null>
-  >({});
-  const [usageAccounts, setUsageAccounts] = useState<UsageAccount[]>([]);
-  const [codexUsageAccounts, setCodexUsageAccounts] = useState<
-    UsageAccount[]
-  >([]);
-  const [grokUsage, setGrokUsage] = useState<GrokUsage | null>(null);
   const [newProjectModal, setNewProjectModal] =
     useState<NewProjectModalState | null>(null);
   const [missingDirQueue, setMissingDirQueue] = useState<MissingDirEntry[]>([]);
@@ -798,46 +319,21 @@ export function App() {
     CUSTOM_DONE_SOUND_STORAGE_KEY,
     SOUND_PATH_CODEC,
   );
-  // Worktrees of the active (local) project, with branch + dirty count. Polled
-  // (not loaded once per project switch) because an agent asked to "work in a
-  // worktree" creates one mid-session — it has to show up without a restart.
-  // Feeds the status bar's checkout picker; the sidebar's worktree grouping and
-  // launcher target additionally require the experimental flag.
-  const [worktrees, setWorktrees] = useState<WorktreeStatus[]>([]);
-  // Bumped after a create/remove so the poll effect re-fires immediately;
-  // without it a freshly created worktree would wait out the poll interval.
-  const [worktreeNudge, setWorktreeNudge] = useState(0);
-  // Checkout the user PINNED in the status bar (slug -> path), overriding the
-  // "follow the console" default. Session-only: a pin is a look-at-this-now
-  // decision, not a project setting.
-  const [pinnedCheckout, setPinnedCheckout] = useState<Record<string, string>>(
-    {},
-  );
-  // Checkout root the ACTIVE terminal is really in: its process cwd (which a
-  // `cd` moves) resolved to the enclosing git root. null until the first read,
-  // or when it can't be determined — then the spawn cwd stands in.
-  const [liveCheckout, setLiveCheckout] = useState<string | null>(null);
   const [railWidth, setRailWidth] = useState(DEFAULT_RAIL_WIDTH_PX);
-  const [localSummariesEnabled, setLocalSummariesEnabled] =
-    usePersistentPreference(LOCAL_SUMMARIES_STORAGE_KEY, LOCAL_SUMMARIES_CODEC);
-  const [ayaIntelligence, setAyaIntelligence] = useState<AyaIntelligenceConfig>(
-    readAyaIntelligenceConfig,
-  );
-  const [initialSummaryCache] = useState(readSummaryCache);
-  const [terminalSummaries, setTerminalSummaries] = useState<Record<string, string>>(
-    () => summariesFromCache(initialSummaryCache, "terminal"),
-  );
-  const [projectSummaries, setProjectSummaries] = useState<Record<string, string>>(
-    () => summariesFromCache(initialSummaryCache, "project"),
-  );
-  const [monitoredSessions, setMonitoredSessions] = useState<MonitoredSession[]>([]);
-  const [summaryNudge, setSummaryNudge] = useState(0);
-  const [autoSummaryStatus, setAutoSummaryStatus] = useState<AutoSummaryStatus>({
-    terminalCount: 0,
-    terminalsWithLines: 0,
-    totalLines: 0,
-    lastEvent: "No automatic summary run yet.",
-  });
+  const terminalsRef = useRef(terminals);
+  const projectsRef = useRef(projects);
+  const {
+    localSummariesEnabled,
+    setLocalSummariesEnabled,
+    ayaIntelligence,
+    terminalSummaries,
+    projectSummaries,
+    setSummaryNudge,
+    autoSummaryStatus,
+    rememberTerminalOutput,
+    updateAyaIntelligence,
+    effects: localSummaryEffects,
+  } = useLocalSummaries({ terminalsRef, projectsRef });
   const effectiveTerminalFontFamily = terminalFontFamily.trim() || undefined;
   const [settingsInitialTab, setSettingsInitialTab] =
     useState<SettingsTab>("general");
@@ -851,11 +347,7 @@ export function App() {
     useState<PendingRepoImport | null>(null);
   const [findInPaneFor, setFindInPaneFor] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH_PX);
-  const [isFullScreen, setIsFullScreen] = useState(false);
-  const [isMaximized, setIsMaximized] = useState(false);
   const [didBootstrap, setDidBootstrap] = useState(false);
-  const [harnessScanDone, setHarnessScanDone] = useState(false);
-  const [foundHarnessCount, setFoundHarnessCount] = useState(0);
   const [hideNoHarnessHint, setHideNoHarnessHint] = useState(
     () => localStorage.getItem(NO_HARNESS_HINT_DISMISSED_STORAGE_KEY) === "1",
   );
@@ -874,170 +366,36 @@ export function App() {
   // Panes whose agent ran `aya status waiting` (with `on`: --on a teammate): the Teams window shows who waits on whom.
   const waitingPanes = useMemo<WaitingPanes>(() => waitingPanesOf(terminals), [terminals]);
 
-  // The active project's own checkout — where a terminal with no worktree
-  // binding runs. null for remote projects (no local working tree).
-  const activeProjectCheckout = useMemo(() => {
-    if (!activeProjectId) return null;
-    const project = findProject(projects, activeProjectId);
-    if (!project || project.remote) return null;
-    const base = projectFallbacks[project.slug] ?? project.directory;
-    return gitContextCwd(base, activeTerminal?.cwd);
-  }, [activeProjectId, projects, projectFallbacks, activeTerminal?.cwd]);
+  projectsRef.current = projects;
+  const activeProjectIdRef = useRef(activeProjectId);
+  activeProjectIdRef.current = activeProjectId;
+  const {
+    setGit,
+    worktrees,
+    pinnedCheckout,
+    activeGitDirectory,
+    activeGit,
+    activeGithubLink,
+    activeBranch,
+    setGithubLinks,
+    createWorktreeForProject,
+    removeWorktreeForProject,
+    pinCheckout,
+  } = useGitStatus({
+    projects,
+    activeProjectId,
+    projectFallbacks,
+    activeTerminal,
+    activeTabId,
+    projectsRef,
+    activeProjectIdRef,
+    findProject,
+    pollVisible,
+    samePollPayload,
+  });
 
-  // Follow the console: read the active terminal's REAL cwd (a `cd` — or an
-  // agent that made itself a worktree and moved into it — leaves the spawn cwd
-  // behind) and resolve it to the enclosing checkout root, since the cwd can be
-  // a subdirectory. Active terminal only, on the git cadence: ~70ms on macOS
-  // (lsof; there is no /proc), so this is not something to run per tab.
-  const liveCwdRef = useRef<string | null>(null);
-  useEffect(() => {
-    liveCwdRef.current = null;
-    setLiveCheckout(null);
-    if (!activeTabId || !activeProjectCheckout) return;
-    let cancelled = false;
-    const refresh = () => {
-      void window.aya.ptyCwd(activeTabId).then(async (cwd) => {
-        if (cancelled || !cwd) return;
-        // Same cwd as last tick — the resolved root can't have changed, so skip
-        // the `git rev-parse`. Only a cd (or the first read) pays for it.
-        if (cwd === liveCwdRef.current) return;
-        const root = await window.aya.getGitRoot(cwd);
-        if (cancelled) return;
-        liveCwdRef.current = cwd;
-        setLiveCheckout(root);
-      });
-    };
-    const stop = pollVisible(refresh, GIT_STATUS_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      stop();
-    };
-  }, [activeTabId, activeProjectCheckout]);
-
-  // The checkout the status bar's git surface describes, in priority order:
-  // what the user pinned in the picker, else where the console actually is,
-  // else the terminal's spawn cwd (a worktree binding or the project dir).
-  // null = nothing to read (no project, or a remote one).
-  const activeGitDirectory = useMemo(() => {
-    if (!activeProjectCheckout) return null;
-    const pinned = activeProjectId ? pinnedCheckout[activeProjectId] : null;
-    return pinned ?? liveCheckout ?? activeProjectCheckout;
-  }, [activeProjectCheckout, activeProjectId, pinnedCheckout, liveCheckout]);
-
-  // Status-bar branch / dirty count goes stale once you `git checkout` in a
-  // shell or commit something — there's no inotify watch, just a small poll
-  // for the active checkout. ~50ms subprocess, 3s cadence; cancelled on
-  // project / worktree-tab switch.
-  useEffect(() => {
-    if (!activeGitDirectory) return;
-    let cancelled = false;
-    const refresh = () => {
-      if (cancelled) return;
-      void window.aya.getGitInfo(activeGitDirectory).then((info) => {
-        if (cancelled) return;
-        setGit((g) => mergeGitInfo(g, activeGitDirectory, info));
-      });
-    };
-    const stop = pollVisible(refresh, GIT_STATUS_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      stop();
-    };
-  }, [activeGitDirectory]);
-
-  // Poll the active local project's worktrees (with branch + dirty count). It
-  // used to load once per project switch, which meant a worktree an agent
-  // created during the session stayed invisible until you switched away and
-  // back. `git worktree list` is ~8ms and the per-worktree status calls only
-  // run when there is more than one checkout to tell apart.
-  useEffect(() => {
-    if (!activeProjectCheckout) {
-      setWorktrees([]);
-      return;
-    }
-    let cancelled = false;
-    const refresh = () => {
-      void window.aya.getGitWorktreeStatus(activeProjectCheckout).then((list) => {
-        if (cancelled) return;
-        setWorktrees((prev) => (samePollPayload(prev, list) ? prev : list));
-      });
-    };
-    const stop = pollVisible(refresh, GIT_STATUS_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      stop();
-    };
-  }, [activeProjectCheckout, worktreeNudge]);
-
-  // Drop a pin whose worktree is gone (removed, or the project now points at a
-  // different repo). Left in place it would aim the whole git surface at a dead
-  // path, and with no branch to render there would be no chip left to click to
-  // undo it. Only acts on a non-empty list, so a failed read doesn't unpin.
-  useEffect(() => {
-    if (!activeProjectId || worktrees.length === 0) return;
-    const pinned = pinnedCheckout[activeProjectId];
-    if (!pinned) return;
-    // Keep the pin only while it still points at a live, branch-bearing
-    // checkout. A worktree that was removed (now absent from the list) or went
-    // prunable/bare (its gitdir is gone) resolves to branch null, which hides
-    // the branch chip AND its picker — leaving no control to un-pin with.
-    const match = worktrees.find((w) => w.path === pinned);
-    if (match && !match.prunable && !match.bare) return;
-    setPinnedCheckout((prev) => {
-      if (!(activeProjectId in prev)) return prev;
-      const next = { ...prev };
-      delete next[activeProjectId];
-      return next;
-    });
-  }, [activeProjectId, worktrees, pinnedCheckout]);
-
-  // Re-read the account-wide usage snapshot a user hook writes (~/.aya/usage.json).
-  // Aya only reads the file — it never fetches usage or touches any token.
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = () => {
-      void window.aya.getUsage().then((u) => {
-        if (!cancelled) {
-          setUsageAccounts((prev) => (samePollPayload(prev, u) ? prev : u));
-        }
-      });
-      void window.aya.getCodexUsage().then((u) => {
-        if (!cancelled) {
-          setCodexUsageAccounts((prev) =>
-            samePollPayload(prev, u) ? prev : u,
-          );
-        }
-      });
-      void window.aya.getGrokUsage().then((u) => {
-        if (!cancelled) {
-          setGrokUsage((prev) => (samePollPayload(prev, u) ? prev : u));
-        }
-      });
-    };
-    const stop = pollVisible(refresh, USAGE_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      stop();
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = () => {
-      void window.aya.listMonitoredSessions().then((sessions) => {
-        if (!cancelled) {
-          setMonitoredSessions((prev) =>
-            samePollPayload(prev, sessions) ? prev : sessions,
-          );
-        }
-      });
-    };
-    const stop = pollVisible(refresh, SESSION_MONITOR_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      stop();
-    };
-  }, []);
+  const { usageAccounts, codexUsageAccounts, grokUsage, monitoredSessions } =
+    useUsagePolling(samePollPayload);
 
   // Handle "open this directory" requests from main — fired by `aya <dir>`
   // CLI invocations and the initial argv. Subscribed once; uses a ref to
@@ -1062,17 +420,7 @@ export function App() {
     });
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    void window.aya.scanHarnesses().then((found) => {
-      if (cancelled) return;
-      setFoundHarnessCount(found.length);
-      setHarnessScanDone(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { foundHarnessCount, harnessScanDone } = useHarnessScan();
 
   // Drain the open-project queue once bootstrap commits. Running this in a
   // useEffect (not inline after setDidBootstrap) guarantees React has flushed
@@ -1095,35 +443,14 @@ export function App() {
     });
   }, [didBootstrap, openQueue]);
 
-  // Track fullscreen state so platform chrome can change without hiding
-  // Aya's normal project tabs and controls.
-  useEffect(() => {
-    let active = true;
-    void window.aya.isFullScreen().then((fs) => {
-      if (active) setIsFullScreen(fs);
-    });
-    const unsubscribe = window.aya.onFullScreenChange((fs) => {
-      setIsFullScreen(fs);
-    });
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    void window.aya.isMaximized().then((maximized) => {
-      if (active) setIsMaximized(maximized);
-    });
-    const unsubscribe = window.aya.onMaximizedChange((maximized) => {
-      setIsMaximized(maximized);
-    });
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, []);
+  const {
+    isFullScreen,
+    isMaximized,
+    minimizeWindow,
+    toggleMaximizeWindow,
+    toggleFullScreenWindow,
+    closeWindow,
+  } = useWindowChrome();
 
   // GPU helper relaunch (#79): the main process signals when Chromium's GPU
   // process died and came back. Relay it as a window event so each visible
@@ -1135,86 +462,50 @@ export function App() {
     });
   }, []);
 
-  // Reload config when one of the user-editable files under ~/.aya/ is edited while
-  // Aya is running. Without this, an edit made by hand to snippets/presets/themes.json
-  // would be overwritten by the next save in the app
-  useEffect(() => {
-    return window.aya.onConfigChange(({ slice }) => {
-      if (slice === "snippets") {
-        void window.aya
-          .listSnippets()
-          .then(setSnippets)
-          .catch((e) =>
-            console.warn(
-              "config hot-reload (snippets) failed; keeping current state",
-              e,
-            ),
-          );
-      } else if (slice === "presets") {
-        void window.aya
-          .listPresets()
-          .then(setPresets)
-          .catch((e) =>
-            console.warn(
-              "config hot-reload (presets) failed; keeping current state",
-              e,
-            ),
-          );
-      } else if (slice === "themes") {
-        void window.aya
-          .listThemes()
-          .then((file) => {
-            setThemes(file.themes);
-            setActiveThemeId(file.activeId);
-          })
-          .catch((e) =>
-            console.warn(
-              "config hot-reload (themes) failed; keeping current state",
-              e,
-            ),
-          );
-      } else if (slice === "projects") {
-        // External edit to projects/*.json (#4). Disk wins for config, but the
-        // merge never kills running terminals: removed tabs keep their live
-        // rows, added tabs appear without spawning, a deleted file of an OPEN
-        // project leaves it in place as unsaved.
-        void window.aya
-          .listProjects()
-          .then((disk) => {
-            const openSlugs = new Set(
-              projectsRef.current.map((p) => p.slug),
-            );
-            const merged = mergeProjectsFromDisk(
-              disk,
-              allProjectsRef.current,
-              openSlugs,
-            );
-            setAllProjects(merged);
-            setProjects((prev) =>
-              prev.map(
-                (p) => merged.find((m) => m.slug === p.slug) ?? p,
-              ),
-            );
-            setTerminals((prev) =>
-              applyExternalProjectEdits(prev, merged, openSlugs),
-            );
-          })
-          .catch((e) =>
-            console.warn(
-              "config hot-reload (projects) failed; keeping current state",
-              e,
-            ),
-          );
-      }
-    });
+  const reloadProjects = useCallback(() => {
+    // External edit to projects/*.json (#4). Disk wins for config, but the
+    // merge never kills running terminals: removed tabs keep their live
+    // rows, added tabs appear without spawning, a deleted file of an OPEN
+    // project leaves it in place as unsaved.
+    void window.aya
+      .listProjects()
+      .then((disk) => {
+        const openSlugs = new Set(
+          projectsRef.current.map((p) => p.slug),
+        );
+        const merged = mergeProjectsFromDisk(
+          disk,
+          allProjectsRef.current,
+          openSlugs,
+        );
+        setAllProjects(merged);
+        setProjects((prev) =>
+          prev.map(
+            (p) => merged.find((m) => m.slug === p.slug) ?? p,
+          ),
+        );
+        setTerminals((prev) =>
+          applyExternalProjectEdits(prev, merged, openSlugs),
+        );
+      })
+      .catch((e) =>
+        console.warn(
+          "config hot-reload (projects) failed; keeping current state",
+          e,
+        ),
+      );
   }, []);
+  useConfigReload({
+    setSnippets,
+    setPresets,
+    setThemes,
+    setActiveThemeId,
+    reloadProjects,
+  });
 
-  const terminalsRef = useRef(terminals);
   terminalsRef.current = terminals;
   const allProjectsRef = useRef(allProjects);
   allProjectsRef.current = allProjects;
-  const projectsRef = useRef(projects);
-  projectsRef.current = projects;
   const projectStateRef = useRef(projectState);
   projectStateRef.current = projectState;
   // Mirrors the active-tab map. closeTerminal advances this ref itself, so a
@@ -1222,8 +513,6 @@ export function App() {
   // rather than the one just closed.
   const activeTabByProjectRef = useRef(activeTabByProject);
   activeTabByProjectRef.current = activeTabByProject;
-  const activeProjectIdRef = useRef(activeProjectId);
-  activeProjectIdRef.current = activeProjectId;
   // Split panes are unsupported in the experimental "projects-left" layout. The
   // ref lets the split callbacks below (defined before the render-time gating)
   // bail out, so keyboard shortcuts and pane clicks can't create or reshape a
@@ -1235,166 +524,6 @@ export function App() {
   presetsRef.current = presets;
   const remotePresetsByProjectRef = useRef(remotePresetsByProject);
   remotePresetsByProjectRef.current = remotePresetsByProject;
-  const terminalOutputRef = useRef<Record<string, string[]>>({});
-  const localSummariesEnabledRef = useRef(localSummariesEnabled);
-  localSummariesEnabledRef.current = localSummariesEnabled;
-  const ayaIntelligenceRef = useRef(ayaIntelligence);
-  ayaIntelligenceRef.current = ayaIntelligence;
-  const summaryMetaRef = useRef<
-    Record<
-      string,
-      { hash: string; updatedAt: number; inFlight: boolean; lineCount: number }
-    >
-  >({});
-  const summaryTimersRef = useRef<Record<string, number>>({});
-
-  const runAutomaticSummary = useCallback(
-    async (
-      key: string,
-      kind: "terminal" | "project",
-      lines: string[],
-      apply: (summary: string) => void,
-    ) => {
-      const intelligence = ayaIntelligenceRef.current;
-      if (
-        !localSummariesEnabledRef.current ||
-        (intelligence.provider === "apple" && window.aya.platform !== "darwin")
-      ) {
-        return;
-      }
-      const recent = lines.slice(-LOCAL_SUMMARY_MAX_LINES);
-      if (recent.length < LOCAL_SUMMARY_MIN_LINES) {
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: not enough output (${recent.length} line${recent.length === 1 ? "" : "s"}).`,
-        }));
-        return;
-      }
-      const hash = summaryHash(recent);
-      const meta = summaryMetaRef.current[key];
-      if (meta?.inFlight || meta?.hash === hash) return;
-      if (
-        meta &&
-        Date.now() - meta.updatedAt < LOCAL_SUMMARY_MIN_UPDATE_MS &&
-        recent.length - meta.lineCount < LOCAL_SUMMARY_MIN_NEW_LINES
-      ) {
-        return;
-      }
-      summaryMetaRef.current[key] = {
-        hash,
-        updatedAt: Date.now(),
-        inFlight: true,
-        lineCount: recent.length,
-      };
-      try {
-        const result = await window.aya.summarizeLocal({
-          kind,
-          lines: recent,
-          intelligence,
-        });
-        if (!result.available) {
-          const message = localSummaryUnavailableMessage(
-            result.error,
-            intelligence.provider,
-          );
-          setAutoSummaryStatus((prev) => ({
-            ...prev,
-            lastEvent: `${kind}: ${message}`,
-          }));
-          return;
-        }
-        if (!result.useful) {
-          setAutoSummaryStatus((prev) => ({
-            ...prev,
-            lastEvent: `${kind}: provider returned no useful summary.`,
-          }));
-          return;
-        }
-        apply(result.summary);
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: ${result.summary}`,
-        }));
-      } catch {
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: request failed.`,
-        }));
-      } finally {
-        const current = summaryMetaRef.current[key];
-        if (current?.hash === hash) {
-          summaryMetaRef.current[key] = {
-            ...current,
-            updatedAt: Date.now(),
-            inFlight: false,
-            lineCount: recent.length,
-          };
-        }
-      }
-    },
-    [],
-  );
-
-  const scheduleTerminalSummary = useCallback(
-    (terminalId: string) => {
-      window.clearTimeout(summaryTimersRef.current[terminalId]);
-      summaryTimersRef.current[terminalId] = window.setTimeout(() => {
-        const terminal = terminalsRef.current[terminalId];
-        if (!terminal) return;
-        const terminalLines = terminalOutputRef.current[terminalId] ?? [];
-        const outputEntries = Object.values(terminalOutputRef.current);
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          terminalCount: Object.keys(terminalsRef.current).length,
-          terminalsWithLines: outputEntries.filter((lines) => lines.length > 0)
-            .length,
-          totalLines: outputEntries.reduce((sum, lines) => sum + lines.length, 0),
-        }));
-        void runAutomaticSummary(
-          `terminal:${terminalId}`,
-          "terminal",
-          terminalLines,
-          (summary) =>
-            setTerminalSummaries((prev) => ({
-              ...prev,
-              [terminalId]: summary,
-            })),
-        );
-        const projectLines = Object.values(terminalsRef.current)
-          .filter((item) => item.projectSlug === terminal.projectSlug)
-          .flatMap((item) => terminalOutputRef.current[item.id] ?? []);
-        void runAutomaticSummary(
-          `project:${terminal.projectSlug}`,
-          "project",
-          projectLines,
-          (summary) =>
-            setProjectSummaries((prev) => ({
-              ...prev,
-              [terminal.projectSlug]: summary,
-            })),
-        );
-      }, LOCAL_SUMMARY_DEBOUNCE_MS);
-    },
-    [runAutomaticSummary],
-  );
-
-  const rememberTerminalOutput = useCallback((terminalId: string, chunk: string) => {
-    // Summaries are opt-in; when off, skip the regex cleaning, buffering, and
-    // scheduling entirely so PTY output isn't taxed on its hot path.
-    if (!localSummariesEnabledRef.current) return;
-    const lines = cleanTerminalOutput(chunk);
-    if (lines.length === 0) return;
-    const current = terminalOutputRef.current[terminalId] ?? [];
-    terminalOutputRef.current[terminalId] = [...current, ...lines].slice(
-      -LOCAL_SUMMARY_BUFFER_LINES,
-    );
-    // scheduleTerminalSummary already debounces the actual summary work off
-    // refs (no per-chunk render). The account-wide "refresh all" effect is
-    // driven by mount / its interval / settings changes / the manual button —
-    // bumping state on every chunk just re-rendered the whole app for nothing.
-    scheduleTerminalSummary(terminalId);
-  }, [scheduleTerminalSummary]);
-
   useEffect(() => {
     if (!activeProjectId) return;
     setWarmProjectSlugs((prev) => [
@@ -1766,202 +895,7 @@ export function App() {
     onPtyEvent: handlePtyTimelineEvent,
   });
 
-  useEffect(() => {
-    const liveIds = new Set(Object.keys(terminals));
-    for (const id of Object.keys(terminalOutputRef.current)) {
-      if (!liveIds.has(id)) delete terminalOutputRef.current[id];
-    }
-    setTerminalSummaries((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      for (const id of Object.keys(next)) {
-        if (!liveIds.has(id)) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [terminals]);
-
-  useEffect(() => {
-    try {
-      const now = Date.now();
-      const terminal = Object.fromEntries(
-        Object.entries(terminalSummaries)
-          .filter(([, summary]) => summary.trim())
-          .map(([id, summary]) => [id, { summary: summary.trim(), updatedAt: now }]),
-      );
-      const project = Object.fromEntries(
-        Object.entries(projectSummaries)
-          .filter(([, summary]) => summary.trim())
-          .map(([slug, summary]) => [
-            slug,
-            { summary: summary.trim(), updatedAt: now },
-          ]),
-      );
-      localStorage.setItem(
-        LOCAL_SUMMARY_CACHE_STORAGE_KEY,
-        JSON.stringify({ terminal, project }),
-      );
-    } catch {
-      /* ignore — summaries are a cache only */
-    }
-  }, [terminalSummaries, projectSummaries]);
-
-  useEffect(() => {
-    if (
-      !localSummariesEnabled ||
-      (ayaIntelligence.provider === "apple" && window.aya.platform !== "darwin")
-    ) {
-      return;
-    }
-
-    let cancelled = false;
-    const runOne = async (
-      key: string,
-      kind: "terminal" | "project",
-      lines: string[],
-      apply: (summary: string) => void,
-    ) => {
-      const recent = lines.slice(-LOCAL_SUMMARY_MAX_LINES);
-      if (recent.length < LOCAL_SUMMARY_MIN_LINES) {
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: not enough output (${recent.length} line${recent.length === 1 ? "" : "s"}).`,
-        }));
-        return;
-      }
-      const hash = summaryHash(recent);
-      const meta = summaryMetaRef.current[key];
-      if (meta?.inFlight || meta?.hash === hash) return;
-      if (
-        meta &&
-        Date.now() - meta.updatedAt < LOCAL_SUMMARY_MIN_UPDATE_MS &&
-        recent.length - meta.lineCount < LOCAL_SUMMARY_MIN_NEW_LINES
-      ) {
-        return;
-      }
-      summaryMetaRef.current[key] = {
-        hash,
-        updatedAt: Date.now(),
-        inFlight: true,
-        lineCount: recent.length,
-      };
-      try {
-        const result = await window.aya.summarizeLocal({
-          kind,
-          lines: recent,
-          intelligence: ayaIntelligence,
-        });
-        if (cancelled) {
-          delete summaryMetaRef.current[key];
-          return;
-        }
-        if (!result.available) {
-          setAutoSummaryStatus((prev) => ({
-            ...prev,
-            lastEvent: `${kind}: provider unavailable${result.error ? ` (${result.error})` : ""}.`,
-          }));
-          return;
-        }
-        if (!result.useful) {
-          setAutoSummaryStatus((prev) => ({
-            ...prev,
-            lastEvent: `${kind}: provider returned no useful summary.`,
-          }));
-          return;
-        }
-        apply(result.summary);
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: ${result.summary}`,
-        }));
-      } catch {
-        setAutoSummaryStatus((prev) => ({
-          ...prev,
-          lastEvent: `${kind}: request failed.`,
-        }));
-      } finally {
-        const current = summaryMetaRef.current[key];
-        if (current?.hash === hash) {
-          summaryMetaRef.current[key] = {
-            ...current,
-            updatedAt: Date.now(),
-            inFlight: false,
-            lineCount: recent.length,
-          };
-        }
-      }
-    };
-
-    const linesForTerminal = async (terminalId: string): Promise<string[]> => {
-      const existing = terminalOutputRef.current[terminalId] ?? [];
-      if (existing.length >= LOCAL_SUMMARY_MIN_LINES) return existing;
-      try {
-        const buffered = await window.aya.ptyBuffer(terminalId);
-        const lines = cleanTerminalOutput(buffered);
-        if (lines.length > existing.length) {
-          terminalOutputRef.current[terminalId] = lines.slice(
-            -LOCAL_SUMMARY_BUFFER_LINES,
-          );
-          return terminalOutputRef.current[terminalId];
-        }
-      } catch {
-        // best effort; live event collection still covers new output
-      }
-      return existing;
-    };
-
-    const refresh = () => {
-      const terminalList = Object.values(terminalsRef.current);
-      const outputEntries = Object.values(terminalOutputRef.current);
-      setAutoSummaryStatus((prev) => ({
-        ...prev,
-        terminalCount: terminalList.length,
-        terminalsWithLines: outputEntries.filter((lines) => lines.length > 0).length,
-        totalLines: outputEntries.reduce((sum, lines) => sum + lines.length, 0),
-      }));
-      for (const terminal of terminalList) {
-        void linesForTerminal(terminal.id).then((lines) =>
-          runOne(`terminal:${terminal.id}`, "terminal", lines, (summary) =>
-            setTerminalSummaries((prev) => ({
-              ...prev,
-              [terminal.id]: summary,
-            })),
-          ),
-        );
-      }
-
-      for (const project of projectsRef.current) {
-        const projectTerminals = terminalList.filter(
-          (terminal) => terminal.projectSlug === project.slug,
-        );
-        void Promise.all(
-          projectTerminals.map((terminal) => linesForTerminal(terminal.id)),
-        ).then((lineGroups) => {
-          const lines = lineGroups.flat().slice(-LOCAL_SUMMARY_MAX_LINES);
-          return runOne(`project:${project.slug}`, "project", lines, (summary) =>
-            setProjectSummaries((prev) => ({
-              ...prev,
-              [project.slug]: summary,
-            })),
-          );
-        });
-      }
-    };
-
-    const timeout = window.setTimeout(
-      refresh,
-      summaryNudge === 0 ? 0 : LOCAL_SUMMARY_DEBOUNCE_MS,
-    );
-    const id = window.setInterval(refresh, LOCAL_SUMMARY_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeout);
-      window.clearInterval(id);
-    };
-  }, [ayaIntelligence, localSummariesEnabled, summaryNudge]);
+  useLocalSummaryEffects(terminals, localSummaryEffects);
 
   // Questions an agent asked before Aya was last closed are still questions: put them back on their panes.
   useEffect(() => {
@@ -2697,70 +1631,6 @@ export function App() {
 
   /** Close the project tab without deleting its JSON config. Closed projects
    *  stay available from search / recent projects but do not auto-reopen. */
-  /** Create a worktree for the active project. Git's own error text is shown
-   *  verbatim — "a branch named 'x' already exists" is exactly what the user
-   *  needs, and a silent failure would look like a broken button. */
-  const createWorktreeForProject = useCallback(async () => {
-    const project = projectsRef.current.find((p) => p.slug === activeProjectId);
-    if (!project || project.remote) return;
-    const branch = window.prompt("New worktree — branch name:")?.trim();
-    if (!branch) return;
-    const parent = project.directory.replace(/\/+$/, "");
-    const suggested = `${parent}-${branch.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
-    const path = window.prompt("Worktree directory:", suggested)?.trim();
-    if (!path) return;
-    const result = await window.aya.createWorktree({
-      directory: project.directory,
-      path,
-      branch,
-    });
-    if (!result.ok) {
-      window.alert(`Could not create the worktree:\n\n${result.error}`);
-      return;
-    }
-    setWorktreeNudge((n) => n + 1);
-  }, [activeProjectId]);
-
-  const removeWorktreeForProject = useCallback(
-    async (worktree: Worktree) => {
-      const project = projectsRef.current.find((p) => p.slug === activeProjectId);
-      if (!project || worktree.isMain) return;
-      if (
-        !window.confirm(
-          `Remove the worktree at ${worktree.path}?\n\nThe branch itself is kept.`,
-        )
-      ) {
-        return;
-      }
-      let result = await window.aya.removeWorktree({
-        directory: project.directory,
-        path: worktree.path,
-      });
-      // Git refuses while the checkout is dirty. Losing uncommitted work is
-      // the user's call to make, so ask rather than forcing by default.
-      if (!result.ok && /contains modified or untracked files|not empty/i.test(result.error)) {
-        if (
-          !window.confirm(
-            `${result.error}\n\nDiscard those changes and remove it anyway?`,
-          )
-        ) {
-          return;
-        }
-        result = await window.aya.removeWorktree({
-          directory: project.directory,
-          path: worktree.path,
-          force: true,
-        });
-      }
-      if (!result.ok) {
-        window.alert(`Could not remove the worktree:\n\n${result.error}`);
-        return;
-      }
-      setWorktreeNudge((n) => n + 1);
-    },
-    [activeProjectId],
-  );
-
   const closeProject = useCallback(async (slug: string) => {
     const owned = Object.values(terminalsRef.current).filter(
       (t) => t.projectSlug === slug,
@@ -2805,7 +1675,7 @@ export function App() {
       delete next[slug];
       return next;
     });
-  }, [updateProjectCollection]);
+  }, [updateProjectCollection, setGit]);
 
   /** Hand a project to another window: drop ALL local state for it WITHOUT
    *  killing its PTYs (they live in the detached host; the adopting window
@@ -2852,7 +1722,7 @@ export function App() {
       delete next[slug];
       return next;
     });
-  }, [updateProjectCollection]);
+  }, [updateProjectCollection, setGit]);
 
   /** Move a project (its tab + running terminals) to another Aya window, or
    *  tear it out into a new one. Local projects only for now - a remote
@@ -2928,7 +1798,7 @@ export function App() {
         ]);
       }
     },
-    [hydrateProjectTerminals, updateProjectCollection],
+    [hydrateProjectTerminals, updateProjectCollection, setGit],
   );
 
   const onCreateProject = useCallback(
@@ -2979,7 +1849,7 @@ export function App() {
         alert(err instanceof Error ? err.message : String(err));
       }
     },
-    [updateProjectCollection],
+    [updateProjectCollection, setGit],
   );
 
   const onCreateRemoteProject = useCallback(
@@ -3059,78 +1929,19 @@ export function App() {
       setShowGitHubLink(next);
       if (!next) setGithubLinks({}); // drop resolved links once the chip is off
     },
-    [setShowGitHubLink],
+    [setShowGitHubLink, setGithubLinks],
   );
 
-  const updateAyaIntelligence = useCallback((next: AyaIntelligenceConfig) => {
-    setAyaIntelligence(next);
-    summaryMetaRef.current = {};
-    setSummaryNudge((n) => n + 1);
-    try {
-      localStorage.setItem(AYA_INTELLIGENCE_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore — localStorage can be unavailable in odd embedded contexts */
-    }
-  }, []);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    // "omarchy" is not a light/dark mode; the skin effect below owns data-theme
-    // (it sets it to the Omarchy palette's own mode).
-    if (appThemePreference === "omarchy") return;
-    if (appThemePreference === "system") {
-      root.removeAttribute("data-theme");
-    } else {
-      root.dataset.theme = appThemePreference;
-    }
-  }, [appThemePreference]);
-
-  // Omarchy skin: when selected, drive the app chrome (inline CSS vars over the
-  // base light/dark tokens) AND the terminal (skinThemeColors) from the current
-  // Omarchy palette, and re-apply live when the Omarchy theme is switched.
-  // Leaving the mode removes the inline vars, restoring the built-in theme.
-  useEffect(() => {
-    if (appThemePreference !== "omarchy") {
-      setSkinThemeColors(null);
-      return;
-    }
-    const root = document.documentElement;
-    let cancelled = false;
-    let applied: string[] = [];
-    // The ONE way out of "skinned": inline custom properties outrank every
-    // stylesheet rule, so a branch that skips this leaves stale chrome.
-    const clearSkin = () => {
-      for (const key of applied) root.style.removeProperty(key);
-      applied = [];
-    };
-    const apply = async () => {
-      const theme = await window.aya.getOmarchyTheme();
-      if (cancelled) return;
-      if (!theme) {
-        // Unskin, but KEEP the preference: a null here is often transient
-        // (omarchy-theme-set relinks current/ mid-read), and persisting
-        // "system" would lose the user's explicit choice permanently.
-        clearSkin();
-        root.removeAttribute("data-theme");
-        setSkinThemeColors(null);
-        return;
-      }
-      root.dataset.theme = theme.palette.mode;
-      const vars = paletteToChromeVars(theme.palette);
-      applied = Object.keys(vars);
-      for (const [key, value] of Object.entries(vars)) {
-        root.style.setProperty(key, value);
-      }
-      setSkinThemeColors(paletteToThemeColors(theme.palette));
-    };
-    void apply();
-    const unsubscribe = window.aya.onOmarchyThemeChange(() => void apply());
-    return () => {
-      cancelled = true;
-      unsubscribe();
-      clearSkin();
-    };
-  }, [appThemePreference]);
+  const { skinThemeColors, onSaveThemes, onImportTheme, activeThemeColors } =
+    useAppTheme({
+      appThemePreference,
+      themes,
+      activeThemeId,
+      setThemes,
+      setActiveThemeId,
+      presetsRef,
+      setPresets,
+    });
 
   /** Called by TerminalView when the user presses Shift+Enter in a
    *  cleanly-exited terminal. Clears the exit state so the PTY event router
@@ -3310,43 +2121,6 @@ export function App() {
     selectTerminalFromSidebar(tabs[next].id);
   }, [activeTabByProject, selectTerminalFromSidebar]);
 
-  const onSaveThemes = useCallback(
-    async (nextThemes: Theme[], nextActiveId: string) => {
-      const activeId = nextThemes.some((t) => t.id === nextActiveId)
-        ? nextActiveId
-        : (nextThemes[0]?.id ?? "");
-      await window.aya.saveThemes({ themes: nextThemes, activeId });
-      setThemes(nextThemes);
-      setActiveThemeId(activeId);
-
-      // Sweep presets for themeId references that point at themes no longer
-      // in the list — otherwise presets.json keeps dangling pointers and the
-      // Settings UI shows "Default" for them (because resolution falls back)
-      // but the data on disk lies.
-      const liveIds = new Set(nextThemes.map((t) => t.id));
-      const currentPresets = presetsRef.current;
-      let dirty = false;
-      const swept = currentPresets.map((p) => {
-        if (p.themeId && !liveIds.has(p.themeId)) {
-          dirty = true;
-          const { themeId: _drop, ...rest } = p;
-          void _drop;
-          return rest;
-        }
-        return p;
-      });
-      if (dirty) {
-        await window.aya.savePresets(swept);
-        setPresets(swept);
-      }
-    },
-    [],
-  );
-
-  const onImportTheme = useCallback(async (): Promise<Theme | null> => {
-    return window.aya.importTheme();
-  }, []);
-
   const dequeueMissingDir = useCallback(() => {
     setMissingDirQueue((q) => q.slice(1));
   }, []);
@@ -3363,7 +2137,7 @@ export function App() {
       });
     }
     dequeueMissingDir();
-  }, [missingDirQueue, hydrateProjectTerminals, dequeueMissingDir]);
+  }, [missingDirQueue, hydrateProjectTerminals, dequeueMissingDir, setGit]);
 
   const handleUseHomeForMissingDir = useCallback(() => {
     const entry = missingDirQueue[0];
@@ -3450,27 +2224,12 @@ export function App() {
   });
   const snippetsOpenForActiveTerminal =
     !!activeTerminal && snippetDrawerTerminalId === activeTerminal.id;
-  // Git surface (branch, dirty, diff, GitHub link) reads the active terminal's
-  // checkout — see activeGitDirectory — so all of it is keyed by directory.
-  const activeGit = activeGitDirectory ? (git[activeGitDirectory] ?? null) : null;
-  const activeGithubLink = activeGitDirectory
-    ? (githubLinks[activeGitDirectory] ?? null)
-    : null;
-  // Resolve the PR/branch link only when the active checkout or its branch
-  // changes — `gh pr view` hits the GitHub API, so we deliberately keep it off
-  // the 3s git poll. Local repos only; remote projects have no working tree.
-  const activeBranch = activeGit?.branch ?? null;
-  useEffect(() => {
-    if (!showGitHubLink || !activeGitDirectory) return;
-    let cancelled = false;
-    void window.aya.getGitHubLink(activeGitDirectory).then((link) => {
-      if (cancelled) return;
-      setGithubLinks((prev) => ({ ...prev, [activeGitDirectory]: link }));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [showGitHubLink, activeGitDirectory, activeBranch]);
+  useGitHubLinkEffect({
+    showGitHubLink,
+    activeGitDirectory,
+    activeBranch,
+    setGithubLinks,
+  });
   // Split panes are not supported in the experimental "projects-left" layout
   // (terminals live in a top tab strip there). Ignore any saved split so the
   // body shows a single terminal, and disable the split actions. The project's
@@ -3561,62 +2320,30 @@ export function App() {
   const visibleTerminalIds = useStable(
     useMemo(
       () =>
-        splitTree
-          ? paneRects
-              .map((pane) => pane.terminalId)
-              .filter((id): id is string => !!id && !!terminals[id])
-          : activeTabId
-            ? [activeTabId]
-            : [],
+        calculateVisibleTerminalIds(splitTree, paneRects, activeTabId, terminals),
       [splitTree, paneRects, activeTabId, terminals],
     ),
     sameArrayItems,
   );
-  // spawnDeferred tabs (added by an external config edit, #4) stay out of the
-  // hidden pool: a hidden TerminalView mounts an xterm and spawns the PTY,
-  // and those tabs must not get a process until first activated.
-  //
-  // Keep all terminals for the active/recent projects warm, plus the active
-  // terminal for each other open project. That preserves fast project switches
-  // in the common working set without mounting every terminal in every project
-  // as hidden xterm DOM/WebGL state.
   const { hiddenTerminals: hiddenTerminalsNext, assignableProjectTerminals: assignableProjectTerminalsNext } =
-    useMemo(() => {
-      const visibleSet = new Set(visibleTerminalIds);
-      const mountedSet = new Set(visibleTerminalIds);
-      const warmProjectSlugSet = new Set(warmProjectSlugs);
-      for (const terminal of projectTerminals) {
-        mountedSet.add(terminal.id);
-      }
-      for (const terminal of Object.values(terminals)) {
-        if (warmProjectSlugSet.has(terminal.projectSlug)) {
-          mountedSet.add(terminal.id);
-        }
-      }
-      for (const project of projects) {
-        const terminalId =
-          activeTabByProject[project.slug] ?? project.tabs[0]?.id;
-        if (terminalId) mountedSet.add(terminalId);
-      }
-      return {
-        hiddenTerminals: Object.values(terminals).filter(
-          (terminal) =>
-            mountedSet.has(terminal.id) &&
-            !visibleSet.has(terminal.id) &&
-            !terminal.spawnDeferred,
-        ),
-        assignableProjectTerminals: projectTerminals.filter(
-          (terminal) => !visibleSet.has(terminal.id),
-        ),
-      };
-    }, [
-      visibleTerminalIds,
-      warmProjectSlugs,
-      projectTerminals,
-      terminals,
-      projects,
-      activeTabByProject,
-    ]);
+    useMemo(
+      () => calculateTerminalLists(
+        visibleTerminalIds,
+        warmProjectSlugs,
+        projectTerminals,
+        terminals,
+        projects,
+        activeTabByProject,
+      ),
+      [
+        visibleTerminalIds,
+        warmProjectSlugs,
+        projectTerminals,
+        terminals,
+        projects,
+        activeTabByProject,
+      ],
+    );
   const hiddenTerminals = useStable(hiddenTerminalsNext, sameArrayItems);
   const assignableProjectTerminals = useStable(
     assignableProjectTerminalsNext,
@@ -3644,44 +2371,15 @@ export function App() {
     projectBadges: projectBadgesNext,
     monitoredSessionsByProject: monitoredSessionsByProjectNext,
     attentionCount,
-  } = useMemo(() => {
-      const badges: Record<string, { count: number; level: ProjectBadgeLevel }> =
-        {};
-      const severityRank = { active: 0, done: 1, waiting: 2, error: 3 } as const;
-      const addProjectBadge = (
-        projectSlug: string,
-        level: ProjectBadgeLevel,
-      ) => {
-        const current = badges[projectSlug];
-        badges[projectSlug] = {
-          count: (current?.count ?? 0) + 1,
-          level:
-            !current || severityRank[level] > severityRank[current.level]
-              ? level
-              : current.level,
-        };
-      };
-      for (const t of Object.values(terminals)) {
-        const level = projectBadgeLevel(t);
-        if (!level) continue;
-        addProjectBadge(t.projectSlug, level);
-      }
-      const byProject: Record<string, MonitoredSession[]> = {};
-      for (const session of monitoredSessions) {
-        const projectSlug = findProjectSlugForSession(session, projects);
-        if (!projectSlug) continue;
-        addProjectBadge(projectSlug, session.level);
-        byProject[projectSlug] = [...(byProject[projectSlug] ?? []), session];
-      }
-      return {
-        projectBadges: badges,
-        monitoredSessionsByProject: byProject,
-        attentionCount: Object.values(badges).reduce(
-          (sum, badge) => sum + (badge.level === "active" ? 0 : badge.count),
-          0,
-        ),
-      };
-    }, [terminals, monitoredSessions, projects]);
+  } = useMemo(
+    () => calculateProjectBadges(
+      terminals,
+      monitoredSessions,
+      projects,
+      findProjectSlugForSession,
+    ),
+    [terminals, monitoredSessions, projects],
+  );
   // Badge/session records rebuild with fresh value objects every recompute;
   // compare by content so an output-only flip (same badges) doesn't hand
   // TopBar/Sidebar a new record identity.
@@ -3703,38 +2401,6 @@ export function App() {
     [allProjects, openKnownProject],
   );
   const openSearch = useCallback(() => setShowSearch(true), []);
-  // Status-bar checkout picker: pin a worktree, or go back to following the
-  // console. Pinning by path (not index) so a worktree added or removed between
-  // renders can't silently repoint the pin at a different checkout.
-  const pinCheckout = useCallback(
-    (path: string | null) => {
-      const slug = activeProjectIdRef.current;
-      if (!slug) return;
-      setPinnedCheckout((prev) => {
-        if (!path) {
-          if (!(slug in prev)) return prev;
-          const next = { ...prev };
-          delete next[slug];
-          return next;
-        }
-        return prev[slug] === path ? prev : { ...prev, [slug]: path };
-      });
-    },
-    [],
-  );
-  const minimizeWindow = useCallback(
-    () => void window.aya.minimizeWindow(),
-    [],
-  );
-  const toggleMaximizeWindow = useCallback(
-    () => void window.aya.toggleMaximizeWindow(),
-    [],
-  );
-  const toggleFullScreenWindow = useCallback(
-    () => void window.aya.setFullScreen(!isFullScreen),
-    [isFullScreen],
-  );
-  const closeWindow = useCallback(() => void window.aya.closeWindow(), []);
   const reorderActiveProjectTerminals = useCallback(
     (orderedIds: string[]) => {
       const slug = activeProjectIdRef.current;
@@ -3816,9 +2482,6 @@ export function App() {
   }, [closeFocusHold, activeProjectId]);
   const ignoreSnippetsOpenChange = useCallback(() => undefined, []);
 
-  const activeTheme = themes.find((t) => t.id === activeThemeId) ?? themes[0];
-  const activeThemeColors: ThemeColors =
-    activeTheme?.colors ?? FALLBACK_THEME_COLORS;
   const isEmpty =
     didBootstrap && projects.length === 0 && missingDirQueue.length === 0;
 
