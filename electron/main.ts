@@ -12,42 +12,26 @@ import {
   Notification,
   shell,
   systemPreferences,
-  type MenuItemConstructorOptions,
+  type BrowserWindowConstructorOptions,
 } from "electron";
 import { autoUpdater } from "electron-updater";
+import { installApplicationMenu, setStaleMenuIcon } from "./app-menu";
+import { showAyaAboutPanel } from "./about-panel";
 import { installWindowZoom } from "./zoom";
-import {
-  accessSync,
-  constants as fsConstants,
-  promises as fs,
-  readFileSync,
-  statSync,
-} from "node:fs";
-import { deflateSync } from "node:zlib";
-import { spawn } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOrCreateProject, listProjects, listProjectState, saveProjectState } from "./config";
-import { bundledAyaCliPath, bundledDistElectronHelperPath } from "./cli-path";
+import { bundledAyaCliPath } from "./cli-path";
 import { isShellCommand, withCliFirst } from "./pane-command";
-import { defaultInstallAyaCliPath, renderCliShim } from "./cli-shim";
-import {
-  type AyaCopy,
-  ayaShimTargets,
-  chooseCliInstallDir,
-  describeCliStatus,
-  insideAsarArchive,
-  offPathNote,
-  planCliInstall,
-} from "./cli-install";
+import { createCliSetup, findExecutableOnPath, pathEntries } from "./cli-setup";
 import { startConfigWatcher } from "./config-watcher";
 import { noteUserAnswer, onStatusPushed, outstandingWaiting } from "./agent-status";
 import { deliverTeamMessage, paneOutputMarks, settledAfterSubmit, startControlServer, type ControlStatusSink, type TurnProbe } from "./control";
 import { confirmOpen, deliverOpenProject, replayOpensOnLoad } from "./open-delivery";
 import { createWindowSource } from "./window-for-open";
 import { createCliAdoptionStore } from "./cli-adoption";
-import { TMP_SUFFIX } from "./atomic-write";
 import { dropCodexBriefSections, rewriteIfChanged } from "./codex-brief";
 import {
   briefText,
@@ -71,11 +55,7 @@ import { createSpawnGate } from "./spawn-gate";
 import {
   appleChat,
   type ChatOptions,
-  type ChatResult,
-  APPLE_HELPER_STDOUT_MAX_BYTES,
-  OLLAMA_BASE_URL,
   providerChat,
-  RECOMMENDED_OLLAMA_MODEL,
 } from "./intelligence-chat";
 import { withLaunchHolds, withSpawnHolds, type TeamControlDeps } from "./team-control";
 import { roleLaunchCheck } from "./launch-config";
@@ -86,7 +66,8 @@ import { userShell } from "./shell";
 import { registerTeamIpc } from "./team-ipc";
 import { askWindowToOpenPanes, newPaneId, RendererRequests, paneAliveOf, presetAgent, teamPaneDeps, type PaneHost } from "./team-panes";
 import { confirmRestart, type RelaunchDeps } from "./relaunch-notes";
-import { restartStaleHost, updateInstaller } from "./update-quit";
+import { restartStaleHost } from "./update-quit";
+import { createUpdates, UPDATE_AUTO_CHECK_DELAY_MS } from "./updates";
 import { notePathRepaired, presetInstalled } from "./command-probe";
 import type { TeamRunner } from "./team-runner";
 import { startRemoteServer } from "./remote-server";
@@ -96,7 +77,6 @@ import {
   CLI_ADOPTION_FILE,
   CONTROL_SOCKET_PATH,
   DIAGNOSTICS_LOG_FILE,
-  EXECUTABLE_FILE_MODE,
   IS_DEV,
   IS_E2E_HEADLESS,
   IS_E2E_PTY_SHUTDOWN,
@@ -108,15 +88,6 @@ import {
   AGENT_BRIEF_FILES_FILE,
 } from "./paths";
 import { createPtyLog } from "./pty-log";
-import {
-  diagnoseRelaunch,
-  readPendingUpdate,
-  markPendingUpdate,
-  markPendingUpdateSync,
-  clearPendingUpdate,
-  cleanShipItCache,
-  shouldCleanShipItCache,
-} from "./update-recovery";
 import { watchOmarchyTheme } from "./omarchy";
 import { isInternalNavigationUrl, parseExternalUrl } from "./navigation";
 import { listPresets, type AgentKind } from "./presets";
@@ -125,11 +96,6 @@ import { DEFAULT_CODEX_HOME } from "./usage-codex";
 import { usageHookStatus } from "./usage-hook";
 import { refreshStatusHookScript, migrateStatusHookCommand } from "./status-hook";
 import { refreshStatusCodexHookScript } from "./status-hook-codex";
-import {
-  LOCAL_SUMMARY_MAX_LINES,
-  normalizeLocalSummaryError,
-  SUMMARY_TEXT_MAX_CHARS,
-} from "./local-summary-errors";
 import { repairProcessPath, resolveLoginShellPath } from "./shell-path";
 import { paneReadText } from "./pane-render";
 import { PTY_HOST_EXIT_WAIT_MS, PtyHostClient, waitForExit } from "./pty-host-client";
@@ -137,9 +103,8 @@ import { homeSocketProblems } from "./socket-path";
 import { PTY_HOST_SCRIPT_NAME } from "./pty-host-staleness";
 import { liveHostRecords, reapStaleHostRecords } from "./pty-host-registry";
 import { gatherHostHealth, probeSocketPid, type HostHealth } from "./pty-host-health";
-import { COMMAND_PROBE_TIMEOUT_MS, HOOK_VIA } from "./constants";
+import { HOOK_VIA } from "./constants";
 import { sweepLegacyAyaProcesses } from "./pty-host-sweep";
-import { requireString } from "./validation";
 import { withSharedDirCommand } from "./agent-session";
 import { loadWindowState, trackWindowState } from "./window-state";
 import { WindowProjectSlices } from "./window-slices";
@@ -161,19 +126,21 @@ import { registerProjectsIpc } from "./ipc/projects-ipc";
 import { registerAyaWebIpc } from "./ipc/aya-web-ipc";
 import { registerPtyIpc } from "./ipc/pty-ipc";
 import { startWebServer, type WebServerHandle } from "./web-server";
-import { parseSummaryResponse, summaryPrompt } from "./summary-prompt";
+import {
+  appleHelperPath,
+  normalizeAyaIntelligenceConfig,
+  ollamaStatus,
+  pullOllamaModel,
+  summarizeLocal,
+  validateLocalSummaryRequest,
+  validateOllamaModelName,
+} from "./aya-intelligence";
 import { restartDialog } from "./native-ui-text";
 import type {
-  AyaIntelligenceConfig,
-  CliStatus,
   ControlStatusUpdate,
   DiagnosticsReport,
-  LocalSummaryRequest,
   SpawnRequest,
-  LocalSummaryResult,
-  OllamaStatus,
   ProjectCollectionState,
-  UpdateStatus,
   WebServerStatus,
 } from "./types";
 
@@ -194,13 +161,6 @@ const WINDOW_MIN_HEIGHT = 500;
 // Theme colors shared between About-dialog CSS and BrowserWindow chrome
 const COLOR_DARK_BG = "#0d1117";
 const COLOR_LIGHT_TEXT = "#f0f6fc";
-// About dialog window dimensions (square, px)
-const ABOUT_DIALOG_SIZE = 360;
-// About dialog icon dimensions (square, px)
-const ABOUT_ICON_SIZE = 128;
-const STALE_MENU_DOT_PX = 16;
-const STALE_MENU_DOT_SCALE_FACTOR = 2;
-const LOCAL_SUMMARY_TIMEOUT_MS = 20_000;
 // Cascade offset for a window opened from another window (File > New Window,
 // tab tear-out), so it doesn't cover its parent exactly.
 const NEW_WINDOW_CASCADE_OFFSET_PX = 28;
@@ -301,16 +261,6 @@ const teamPaneHost: PaneHost = {
     return () => roles.forEach(({ ptyId }) => pendingPaneRoles.delete(ptyId));
   },
 };
-const UPDATE_AUTO_CHECK_DELAY_MS = 12_000;
-// Summarizer sampling knobs, shared by BOTH backends (OpenAI-compatible and
-// Ollama) - the two request builders must stay in sync.
-const SUMMARY_TEMPERATURE = 0.2;
-const SUMMARY_MAX_TOKENS = 64;
-// Bound captured `ollama pull` stderr so a chatty child can't balloon memory.
-const OLLAMA_PULL_STDERR_MAX_BYTES = 8192;
-// Max accepted Ollama model-name length (IPC input-validation cap).
-const OLLAMA_MODEL_NAME_MAX_LEN = 120;
-const OLLAMA_MODEL_NAME_RE = new RegExp(`^[A-Za-z0-9._:/-]{1,${OLLAMA_MODEL_NAME_MAX_LEN}}$`);
 // Cap of $PATH entries returned to the renderer diagnostics view.
 const MAX_PATH_ENTRIES_RETURNED = 40;
 // Delay before re-probing a host that answered the version handshake with
@@ -323,22 +273,6 @@ const MACOS_FULLSCREEN_HACK_DELAY_MS = 250;
 // terminal children of dead hosts). Off the startup path: nothing it targets
 // can interfere with the fresh session, so first paint never pays for it.
 const LEGACY_SWEEP_DELAY_MS = 5_000;
-let updateStatus: UpdateStatus = {
-  phase: "idle",
-  supported: false,
-  currentVersion: "0.0.0",
-};
-let updateEventsConfigured = false;
-let updateCheckInFlight: Promise<UpdateStatus> | null = null;
-// True from the moment we hand off to ShipIt until we quit (#78). A second
-// install click must not spawn a second ShipIt - overlapping install requests
-// are a suspected cause of the silent-rollback failure.
-const updateLatch = { installing: false };
-// Sticky #78 warning: the phase it used to live in is replaced by the startup
-// auto-check 12 s later, so it is merged in separately and cleared on apply.
-let rollbackNotice: string | null = null;
-// Where to send a user whose auto-update silently failed (#78).
-const RELEASES_URL = "https://github.com/khasinski/aya/releases/latest";
 let macosWindowHack:
   | {
       apply(handle: Buffer): void;
@@ -381,447 +315,11 @@ function toggleAyaFullScreen(win: BrowserWindow | null): void {
   setAyaFullScreen(win, !isAyaFullScreen(win));
 }
 
-function unavailableLocalSummary(error?: string): LocalSummaryResult {
-  const normalized = normalizeLocalSummaryError(error);
-  return {
-    available: false,
-    useful: false,
-    summary: "",
-    ...(normalized ? { error: normalized } : {}),
-  };
-}
-
-function normalizeAyaIntelligenceConfig(
-  value: unknown,
-): AyaIntelligenceConfig | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const input = value as Record<string, unknown>;
-  const provider =
-    input.provider === "ollama" || input.provider === "openai"
-      ? input.provider
-      : "apple";
-  return {
-    provider,
-    ollamaModel:
-      typeof input.ollamaModel === "string" && input.ollamaModel.trim()
-        ? input.ollamaModel.trim()
-        : RECOMMENDED_OLLAMA_MODEL,
-    openAiBaseUrl:
-      typeof input.openAiBaseUrl === "string" ? input.openAiBaseUrl.trim() : "",
-    openAiApiKey:
-      typeof input.openAiApiKey === "string" ? input.openAiApiKey.trim() : "",
-    openAiModel:
-      typeof input.openAiModel === "string" ? input.openAiModel.trim() : "",
-  };
-}
-
-function validateLocalSummaryRequest(value: unknown): LocalSummaryRequest {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("local-summary:summarize.req must be an object");
-  }
-  const req = value as Record<string, unknown>;
-  const kind = req.kind === "project" ? "project" : "terminal";
-  if (!Array.isArray(req.lines)) {
-    throw new Error("local-summary:summarize.lines must be an array");
-  }
-  const lines = req.lines
-    .filter((line): line is string => typeof line === "string")
-    .slice(-LOCAL_SUMMARY_MAX_LINES);
-  return {
-    kind,
-    lines,
-    ...(req.intelligence
-      ? { intelligence: normalizeAyaIntelligenceConfig(req.intelligence) }
-      : {}),
-  };
-}
-
-/** The bundled Apple Foundation Models helper (no e2e override). */
-function appleHelperPath(): string {
-  return bundledDistElectronHelperPath(__dirname, "aya-local-summary");
-}
-
-async function summarizeWithApple(
-  req: LocalSummaryRequest,
-): Promise<LocalSummaryResult> {
-  if (process.platform !== "darwin") return unavailableLocalSummary("unsupported-platform");
-  const helper = appleHelperPath();
-  try {
-    await fs.access(helper, fsConstants.X_OK);
-  } catch {
-    return unavailableLocalSummary("helper-missing");
-  }
-
-  return new Promise((resolve) => {
-    const child = spawn(helper, [], { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      resolve(unavailableLocalSummary("timeout"));
-    }, LOCAL_SUMMARY_TIMEOUT_MS);
-
-    const finish = (result: LocalSummaryResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-
-    child.stdout.setEncoding("utf-8");
-    child.stdout.on("data", (chunk: string) => {
-      if (stdout.length < APPLE_HELPER_STDOUT_MAX_BYTES) stdout += chunk;
-    });
-    child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk: string) => {
-      if (stderr.length < APPLE_HELPER_STDOUT_MAX_BYTES) stderr += chunk;
-    });
-    child.on("error", (error) => finish(unavailableLocalSummary(error.message)));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        finish(unavailableLocalSummary(stderr.trim() || `helper-exit-${code}`));
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout) as Partial<LocalSummaryResult>;
-        const summary =
-          typeof parsed.summary === "string"
-            ? parsed.summary.replace(/\s+/g, " ").trim().slice(0, SUMMARY_TEXT_MAX_CHARS)
-            : "";
-        finish({
-          available: parsed.available === true,
-          useful: parsed.useful === true && summary.length > 0,
-          summary: parsed.useful === true ? summary : "",
-          ...(typeof parsed.error === "string" && parsed.error
-            ? { error: normalizeLocalSummaryError(parsed.error) }
-            : {}),
-        });
-      } catch {
-        finish(unavailableLocalSummary("invalid-helper-json"));
-      }
-    });
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(JSON.stringify(req));
-  });
-}
-
-const SUMMARY_SYSTEM = "You summarize terminal output for a developer tool. Return JSON only.";
-const SUMMARY_CHAT = {
-  temperature: SUMMARY_TEMPERATURE,
-  maxTokens: SUMMARY_MAX_TOKENS,
-  timeoutMs: LOCAL_SUMMARY_TIMEOUT_MS,
-};
-
-function summaryFromChat(result: ChatResult): LocalSummaryResult {
-  if (!result.ok) return unavailableLocalSummary(result.error);
-  if (!result.content) return { available: true, useful: false, summary: "" };
-  return parseSummaryResponse(result.content);
-}
-
-async function summarizeLocal(
-  req: LocalSummaryRequest,
-): Promise<LocalSummaryResult> {
-  const intelligence = req.intelligence;
-  if (!intelligence || intelligence.provider === "apple") {
-    return summarizeWithApple(req);
-  }
-  return summaryFromChat(await providerChat(intelligence, SUMMARY_SYSTEM, summaryPrompt(req), SUMMARY_CHAT));
-}
-
-async function ollamaStatus(
-  recommendedModel = RECOMMENDED_OLLAMA_MODEL,
-): Promise<OllamaStatus> {
-  const executable = findExecutableOnPath("ollama");
-  if (!executable) {
-    return {
-      installed: false,
-      running: false,
-      path: null,
-      models: [],
-      recommendedModel,
-      recommendedModelInstalled: false,
-      message: "Ollama is not installed or not on PATH.",
-    };
-  }
-  try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-      signal: AbortSignal.timeout(COMMAND_PROBE_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      return {
-        installed: true,
-        running: false,
-        path: executable,
-        models: [],
-        recommendedModel,
-        recommendedModelInstalled: false,
-        message: `Ollama API returned HTTP ${response.status}.`,
-      };
-    }
-    const json = (await response.json()) as {
-      models?: Array<{ name?: unknown; model?: unknown }>;
-    };
-    const models = (Array.isArray(json.models) ? json.models : [])
-      .map((model) =>
-        typeof model.name === "string"
-          ? model.name
-          : typeof model.model === "string"
-            ? model.model
-            : "",
-      )
-      .filter(Boolean);
-    return {
-      installed: true,
-      running: true,
-      path: executable,
-      models,
-      recommendedModel,
-      recommendedModelInstalled: models.includes(recommendedModel),
-    };
-  } catch (err) {
-    return {
-      installed: true,
-      running: false,
-      path: executable,
-      models: [],
-      recommendedModel,
-      recommendedModelInstalled: false,
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-function validateOllamaModelName(value: unknown): string {
-  const model = requireString(value, "intelligence:pull-ollama-model.model").trim();
-  if (!OLLAMA_MODEL_NAME_RE.test(model)) {
-    throw new Error("Ollama model name contains unsupported characters.");
-  }
-  return model;
-}
-
-async function pullOllamaModel(model: string): Promise<OllamaStatus> {
-  const executable = findExecutableOnPath("ollama");
-  if (!executable) throw new Error("Ollama is not installed or not on PATH.");
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, ["pull", model], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk: string) => {
-      if (stderr.length < OLLAMA_PULL_STDERR_MAX_BYTES) stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || `ollama pull exited ${code}`));
-    });
-  });
-  return ollamaStatus(model);
-}
-
-function pathEntries(): string[] {
-  return (process.env.PATH ?? "")
-    .split(path.delimiter)
-    // Relative entries (`node_modules/.bin`, `.`) depend on the cwd, so an
-    // `aya` found or written there means nothing to a shell elsewhere.
-    .filter((entry) => entry.trim().length > 0 && path.isAbsolute(entry));
-}
-
-function findExecutableOnPath(name: string): string | null {
-  for (const entry of pathEntries()) {
-    const candidate = path.join(entry, name);
-    try {
-      accessSync(candidate, fsConstants.X_OK);
-      return candidate;
-    } catch {
-      // keep looking
-    }
-  }
-  return null;
-}
-
-async function anyExecutable(paths: string[]): Promise<boolean> {
-  for (const p of paths) {
-    try {
-      await fs.access(p, fsConstants.X_OK);
-      return true;
-    } catch {
-      // try the next candidate
-    }
-  }
-  return false;
-}
-
-/** A missing dir counts when its nearest existing ancestor is writable, since
- *  install creates it (a fresh ~/.local/bin). */
-function isWritableDir(dir: string): boolean {
-  try {
-    if (!statSync(dir).isDirectory()) return false;
-    accessSync(dir, fsConstants.W_OK);
-    return true;
-  } catch (err) {
-    const parent = path.dirname(dir);
-    return (
-      (err as NodeJS.ErrnoException).code === "ENOENT" &&
-      parent !== dir &&
-      isWritableDir(parent)
-    );
-  }
-}
-
-/** Something at `target` that Reinstall must not write through: a symlink, or
- *  a file that is not our shim. */
-async function foreignFileAt(target: string): Promise<boolean> {
-  try {
-    if ((await fs.lstat(target)).isSymbolicLink()) return true;
-    return ayaShimTargets(await fs.readFile(target, "utf-8")).length === 0;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code !== "ENOENT";
-  }
-}
-
-/** Every `aya` on PATH, in PATH order - not just the one a shell runs, so a
- *  dead copy waiting below it is visible too (#115). */
-async function ayaCopiesOnPath(): Promise<AyaCopy[]> {
-  const copies: AyaCopy[] = [];
-  const seen = new Set<string>();
-  for (const entry of pathEntries()) {
-    const candidate = path.join(entry, "aya");
-    if (seen.has(candidate)) continue;
-    seen.add(candidate);
-    try {
-      accessSync(candidate, fsConstants.X_OK);
-    } catch {
-      continue;
-    }
-    // A symlink (e.g. into a dotfiles repo) is the user's arrangement: listed,
-    // but never ours to rewrite, repair or remove (#120 review).
-    let symlink = false;
-    try {
-      symlink = (await fs.lstat(candidate)).isSymbolicLink();
-    } catch {
-      // vanished between access and lstat: treat as a plain file
-    }
-    let targets: string[] = [];
-    try {
-      targets = ayaShimTargets(await fs.readFile(candidate, "utf-8"));
-    } catch {
-      // unreadable: treat as not ours
-    }
-    // A shim can be on PATH yet dead: it bakes an absolute path into Aya.app,
-    // and moving/renaming the app kills it (follow-up on #42).
-    const ours = targets.length > 0 && !symlink;
-    copies.push({
-      path: candidate,
-      ours,
-      broken:
-        ours &&
-        !(await anyExecutable(
-          targets.filter((target) => !insideAsarArchive(target)),
-        )),
-    });
-  }
-  return copies;
-}
-
-function cliInstallDir() {
-  return chooseCliInstallDir(pathEntries(), os.homedir(), isWritableDir);
-}
-
-async function cliStatus(): Promise<CliStatus> {
-  const copies = await ayaCopiesOnPath();
-  const choice = cliInstallDir();
-  const active = copies[0] ?? null;
-  const message = describeCliStatus(copies, choice);
-  return {
-    installed: active !== null,
-    path: active?.path ?? null,
-    installDir: choice.dir,
-    installable: true,
-    copies,
-    ...(message ? { message } : {}),
-  };
-}
-
-function freshCliShim(): string {
-  return renderCliShim(
-    bundledAyaCliPath(__dirname),
-    defaultInstallAyaCliPath(process.platform),
-  );
-}
-
-async function writeCliShim(target: string, script: string): Promise<void> {
-  // Temp file + rename: a failed write can't leave a truncated, dead shim, and
-  // rename replaces the entry itself instead of writing through a link.
-  const tmp = `${target}.aya-${process.pid}${TMP_SUFFIX}`;
-  try {
-    await fs.writeFile(tmp, script, { mode: EXECUTABLE_FILE_MODE });
-    await fs.chmod(tmp, EXECUTABLE_FILE_MODE);
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.rm(tmp, { force: true }).catch(() => {});
-    throw err;
-  }
-}
-
-async function installCli(): Promise<CliStatus> {
-  const choice = cliInstallDir();
-  const installDir = choice.dir;
-  const source = bundledAyaCliPath(__dirname);
-  // Refuse to install a shim that cannot work. The asar path bug (#39) made
-  // Install report success while the written shim exec'd a file inside the
-  // archive; verifying the exec bit up front turns any future packaging
-  // regression into a visible error instead of a silently broken CLI.
-  try {
-    await fs.access(source, fsConstants.X_OK);
-  } catch {
-    return {
-      installed: false,
-      path: null,
-      installDir,
-      installable: false,
-      message: `Bundled aya CLI is not executable at ${source}`,
-    };
-  }
-  const target = path.join(installDir, "aya");
-  if (await foreignFileAt(target)) {
-    return {
-      ...(await cliStatus()),
-      message: `${target} exists and was not installed by Aya - move it away, then click Reinstall.`,
-    };
-  }
-  await fs.mkdir(installDir, { recursive: true });
-  const script = freshCliShim();
-  await writeCliShim(target, script);
-  // Aya Dev writes a shim aimed at this checkout; spreading it to the user's
-  // other copies would repoint their production `aya` (#120 review).
-  const plan = IS_DEV
-    ? { rewrite: [] as string[], remove: [] as string[] }
-    : planCliInstall(await ayaCopiesOnPath(), target);
-  const failed: string[] = [];
-  for (const copy of plan.rewrite) {
-    await writeCliShim(copy, script).catch(() => failed.push(copy));
-  }
-  for (const copy of plan.remove) {
-    await fs.rm(copy, { force: true }).catch(() => failed.push(copy));
-  }
-  const status = await cliStatus();
-  const installedMessage = `Installed at ${target}${offPathNote(choice)}`;
-  return {
-    ...status,
-    message: failed.length
-      ? `${installedMessage}. Could not update ${failed.join(", ")}.`
-      : choice.onPath
-        ? (status.message ?? installedMessage)
-        : installedMessage,
-  };
-}
+const { cliStatus, installCli, healDeadCliShims } = createCliSetup({
+  app,
+  mainDirname: __dirname,
+  isDev: IS_DEV,
+});
 
 /** One Aya-owned rules file for every antigravity preset: present while any
  *  of them opts in, deleted once none does (or none is left). */
@@ -852,30 +350,6 @@ const paneBriefDeps: PaneBriefDeps = {
   starts: (spawn) => ptyHost.willStart(spawn),
   running: paneRunning,
 };
-
-/** Rewrites dead shims at startup for users who never reopen Settings (#115).
- *  Packaged only: in dev the fresh shim would aim at this checkout. */
-async function healDeadCliShims(): Promise<void> {
-  if (IS_DEV || !app.isPackaged) return;
-  // An AppImage mounts under a fresh /tmp/.mount_* each launch: a "repaired"
-  // shim would aim at a path that dies when the app quits.
-  if (process.env.APPIMAGE) return;
-  try {
-    await fs.access(bundledAyaCliPath(__dirname), fsConstants.X_OK);
-  } catch {
-    return;
-  }
-  const script = freshCliShim();
-  for (const copy of await ayaCopiesOnPath()) {
-    if (!copy.broken) continue;
-    try {
-      await writeCliShim(copy.path, script);
-      console.log(`[aya] repaired dead aya shim at ${copy.path}`);
-    } catch (err) {
-      console.warn(`[aya] could not repair dead aya shim at ${copy.path}:`, err);
-    }
-  }
-}
 
 /** The version of the host the client WOULD spawn, from package.json as the host reads it: app.getVersion()
  *  is Electron's own outside a packaged app, and that mismatch killed a current host on every dev/e2e boot. */
@@ -966,213 +440,6 @@ async function diagnosticsReport(): Promise<DiagnosticsReport> {
   };
 }
 
-function updatesSupportedMessage(): string {
-  if (IS_DEV || !app.isPackaged) return "Updates are disabled in development builds.";
-  if (process.platform === "darwin") return "";
-  if (process.platform === "linux") {
-    return process.env.APPIMAGE
-      ? ""
-      : "Automatic install is only available for the AppImage build on Linux.";
-  }
-  return "Automatic updates are not supported on this platform.";
-}
-
-function updateStatusBase(): Pick<
-  UpdateStatus,
-  "supported" | "currentVersion" | "rollbackNotice"
-> {
-  return {
-    supported: updatesSupportedMessage() === "",
-    currentVersion: app.getVersion(),
-    // Merged into every status write so it survives the 12 s auto-check.
-    ...(rollbackNotice ? { rollbackNotice } : {}),
-  };
-}
-
-function setUpdateStatus(
-  next: Omit<UpdateStatus, "supported" | "currentVersion">,
-  // Kept for call-site compat; updates are app-wide, so the status is
-  // broadcast to every live window regardless of which one was passed.
-  _win: BrowserWindow | null = null,
-): UpdateStatus {
-  updateStatus = {
-    ...updateStatusBase(),
-    ...next,
-  };
-  eachAyaWindow((win) => {
-    win.webContents.send("updates:status", updateStatus);
-  });
-  return updateStatus;
-}
-
-function getUpdateStatus(): UpdateStatus {
-  if (updatesSupportedMessage()) {
-    return {
-      ...updateStatusBase(),
-      phase: "unsupported",
-      message: updatesSupportedMessage(),
-    };
-  }
-  return {
-    ...updateStatus,
-    ...updateStatusBase(),
-  };
-}
-
-function updateVersion(info: unknown): string | undefined {
-  return typeof info === "object" &&
-    info !== null &&
-    typeof (info as { version?: unknown }).version === "string"
-    ? (info as { version: string }).version
-    : undefined;
-}
-
-/** A requested update against the version we came back as (#78): a silent ShipIt rollback looks like success,
- *  so its state is cleaned, the update marked errored, and the user pointed at the releases page. */
-async function reconcilePendingUpdate(win: BrowserWindow | null): Promise<void> {
-  const pending = await readPendingUpdate();
-  const diagnosis = diagnoseRelaunch(pending, app.getVersion());
-  if (diagnosis === "none") return;
-  await clearPendingUpdate();
-  updateLatch.installing = false;
-  if (diagnosis === "applied") {
-    rollbackNotice = null; // an install landed; retire any earlier warning
-    return; // it worked; stay quiet
-  }
-  // Rolled back: the install silently failed and we relaunched the old bundle.
-  diagnosticsLog.append("update-rolled-back", {
-    target: pending?.targetVersion,
-    current: app.getVersion(),
-    attempts: pending?.attempts,
-  });
-  // The notice is cheap and true either way; the recursive wipe can land under
-  // a live install, so it waits for a repeat failure.
-  if (shouldCleanShipItCache(pending)) await cleanShipItCache();
-  rollbackNotice = `The update to ${pending?.targetVersion} didn't install - still on ${app.getVersion()}. Try the DMG from the releases page.`;
-  setUpdateStatus({
-    phase: "error",
-    message: rollbackNotice,
-  });
-  const message = `Update to ${pending?.targetVersion} didn't apply`;
-  const detail = `Aya is still on ${app.getVersion()}. The in-app update failed to install and rolled back to the current version. You can install the latest release manually.`;
-  const opts: Electron.MessageBoxOptions = {
-    type: "warning",
-    buttons: ["Open releases page", "Later"],
-    defaultId: 0,
-    cancelId: 1,
-    message,
-    detail,
-  };
-  const choice =
-    win && !win.isDestroyed()
-      ? await dialog.showMessageBox(win, opts)
-      : await dialog.showMessageBox(opts);
-  if (choice.response === 0) await shell.openExternal(RELEASES_URL);
-}
-
-function configureAutoUpdates(win: BrowserWindow): void {
-  if (updateEventsConfigured) return;
-  updateEventsConfigured = true;
-  updateStatus = getUpdateStatus();
-  if (!updateStatus.supported) return;
-
-  autoUpdater.autoDownload = true;
-  // Never on a quit by itself: an ordinary quit checks the panes' background work first (before-quit).
-  autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.allowPrerelease = false;
-
-  autoUpdater.on("checking-for-update", () => {
-    setUpdateStatus({ phase: "checking", message: "Checking for updates." }, win);
-  });
-  autoUpdater.on("update-available", (info) => {
-    setUpdateStatus(
-      {
-        phase: "available",
-        availableVersion: updateVersion(info),
-        message: "Update found. Downloading in the background.",
-        checkedAt: new Date().toISOString(),
-      },
-      win,
-    );
-  });
-  autoUpdater.on("update-not-available", (info) => {
-    setUpdateStatus(
-      {
-        phase: "not-available",
-        availableVersion: updateVersion(info),
-        message: "Aya is up to date.",
-        checkedAt: new Date().toISOString(),
-      },
-      win,
-    );
-  });
-  autoUpdater.on("download-progress", (progress) => {
-    setUpdateStatus(
-      {
-        phase: "downloading",
-        percent:
-          typeof progress.percent === "number"
-            ? Math.max(0, Math.min(100, progress.percent))
-            : undefined,
-        message: "Downloading update.",
-      },
-      win,
-    );
-  });
-  autoUpdater.on("update-downloaded", (info) => {
-    const downloadedVersion = updateVersion(info);
-    setUpdateStatus(
-      {
-        phase: "downloaded",
-        downloadedVersion,
-        message: downloadedVersion
-          ? `Aya ${downloadedVersion} is ready to install.`
-          : "Update is ready to install.",
-      },
-      win,
-    );
-    if (Notification.isSupported()) {
-      new Notification({
-        title: "Aya update ready",
-        body: "Restart Aya to install the update.",
-      }).show();
-    }
-  });
-  autoUpdater.on("error", (error) => {
-    // quitAndInstall reports a failed handoff HERE rather than throwing, so this
-    // is the only place an async install failure can release the latch. The
-    // marker is deliberately kept: `error` also fires for unrelated checks, and
-    // deleting it there would cost the whole #78 detector.
-    updateLatch.installing = false;
-    setUpdateStatus({
-      phase: "error",
-      message: error instanceof Error ? error.message : String(error),
-      checkedAt: new Date().toISOString(),
-    });
-  });
-}
-
-async function checkForUpdates(): Promise<UpdateStatus> {
-  if (updatesSupportedMessage()) return getUpdateStatus();
-  if (updateCheckInFlight) return updateCheckInFlight;
-  updateCheckInFlight = (async () => {
-    try {
-      setUpdateStatus({ phase: "checking", message: "Checking for updates." });
-      await autoUpdater.checkForUpdates();
-      return getUpdateStatus();
-    } catch (err) {
-      return setUpdateStatus({
-        phase: "error",
-        message: err instanceof Error ? err.message : String(err),
-        checkedAt: new Date().toISOString(),
-      });
-    } finally {
-      updateCheckInFlight = null;
-    }
-  })();
-  return updateCheckInFlight;
-}
-
 function configureAppIdentity(): void {
   // Keep macOS menu/about/notification surfaces aligned. Dev runs inside
   // Electron.app, so some OS chrome can still reflect the host bundle, but
@@ -1248,10 +515,6 @@ function devIconPath(): string {
   return path.join(__dirname, "..", "build", "icon.png");
 }
 
-function devAboutIconPath(): string {
-  return devIconPath();
-}
-
 async function openExternalUrl(raw: string): Promise<void> {
   const parsed = parseExternalUrl(raw);
   if (!parsed) throw new Error("Unsupported external URL.");
@@ -1312,106 +575,17 @@ function dispatchShortcut(action: string): void {
   target.webContents.send("shortcut", action);
 }
 
-function showAyaAboutPanel(): void {
-  if (!IS_DEV && process.platform === "darwin") {
-    app.showAboutPanel();
-    return;
-  }
-  const parent = focusedAyaWindow() ?? undefined;
-  const about = new BrowserWindow({
-    width: ABOUT_DIALOG_SIZE,
-    height: ABOUT_DIALOG_SIZE,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    parent,
-    modal: !!parent,
-    title: `About ${WINDOW_TITLE}`,
-    backgroundColor: COLOR_DARK_BG,
-    show: false,
-    webPreferences: {
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  about.setMenu(null);
-  let iconUrl = "";
-  try {
-    const png = readFileSync(devAboutIconPath());
-    iconUrl = `data:image/png;base64,${png.toString("base64")}`;
-  } catch {
-    // Empty src keeps the dialog usable even if the icon asset is missing.
-  }
-  const html = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <style>
-      * { box-sizing: border-box; }
-      html, body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-        color: ${COLOR_LIGHT_TEXT};
-        background: ${COLOR_DARK_BG};
-      }
-      body {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      main {
-        width: 100%;
-        padding: 28px 28px 24px;
-        text-align: center;
-      }
-      img {
-        display: block;
-        width: ${ABOUT_ICON_SIZE}px;
-        height: ${ABOUT_ICON_SIZE}px;
-        margin: 0 auto 18px;
-      }
-      h1 {
-        margin: 0;
-        font-size: 22px;
-        font-weight: 650;
-        letter-spacing: 0;
-      }
-      p {
-        margin: 7px 0 0;
-        font-size: 13px;
-        color: #8b949e;
-      }
-      button {
-        margin-top: 24px;
-        min-width: 78px;
-        height: 30px;
-        border: 1px solid #30363d;
-        border-radius: 6px;
-        color: ${COLOR_LIGHT_TEXT};
-        background: #161b22;
-        font: inherit;
-        font-size: 13px;
-      }
-      button:hover { background: #21262d; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <img src="${iconUrl}" alt="">
-      <h1>${WINDOW_TITLE}</h1>
-      <p>Version ${app.getVersion()}</p>
-      <button autofocus onclick="window.close()">OK</button>
-    </main>
-  </body>
-</html>`;
-  about.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  about.once("ready-to-show", () => about.show());
-}
+const aboutPanelDeps = {
+  app,
+  isDev: IS_DEV,
+  platform: process.platform,
+  windowTitle: WINDOW_TITLE,
+  darkBackground: COLOR_DARK_BG,
+  lightText: COLOR_LIGHT_TEXT,
+  focusedAyaWindow,
+  createWindow: (options: BrowserWindowConstructorOptions) => new BrowserWindow(options),
+  devIconPath,
+};
 
 // Set to true when a stale PTY host is detected on launch (#28). The Restart
 // Aya menu item reads this flag so it can kill the stale host before relaunching.
@@ -1426,8 +600,6 @@ let appQuitting = false;
 const TEAM_QUIT_SETTLE_MS = 2_000;
 let teamsAtQuit: TeamRunner | null = null;
 let teamsStopped = false;
-// The install an ordinary quit started holds the quit this long at most before it quits without it.
-const QUIT_INSTALL_SETTLE_MS = 15_000;
 
 // --- Aya Web (experimental): browser access over HTTP + WebSocket ---
 let webConfig: WebConfig | null = null;
@@ -1508,239 +680,23 @@ function webStatus(): WebServerStatus {
   };
 }
 
-/** Build a minimal RGBA PNG containing a filled circle.
- *  Uses only Node built-ins (zlib deflate + manual PNG framing). */
-function makeCirclePng(size: number, r: number, g: number, b: number): Buffer {
-  const cx = size / 2;
-  const cy = size / 2;
-  const r2 = (size / 2 - 1) ** 2; // squared radius (1px inset so circle doesn't clip)
-  const rows: number[] = [];
-  for (let y = 0; y < size; y++) {
-    rows.push(0); // PNG filter byte: None
-    for (let x = 0; x < size; x++) {
-      const inside = (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r2;
-      rows.push(r, g, b, inside ? 255 : 0);
-    }
-  }
-  const chunk = (type: string, data: Buffer): Buffer => {
-    const t = Buffer.from(type, "ascii");
-    let c = 0xffffffff;
-    for (const byte of Buffer.concat([t, data])) {
-      c ^= byte;
-      for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    const len = Buffer.alloc(4);
-    len.writeUInt32BE(data.length);
-    const crc = Buffer.alloc(4);
-    crc.writeUInt32BE((c ^ 0xffffffff) >>> 0);
-    return Buffer.concat([len, t, data, crc]);
-  };
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
-  ihdr.writeUInt8(8, 8); // bit depth
-  ihdr.writeUInt8(6, 9); // color type: RGBA
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), // PNG signature
-    chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(Buffer.from(rows))),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-function installApplicationMenu(): void {
-  configureAppIdentity();
-  const restartItem: MenuItemConstructorOptions = {
-    id: "restart-aya",
-    label: `Restart ${WINDOW_TITLE}`,
-    click: async () => {
-      // Only a stale host is restarted with Aya; a current one keeps its panes running.
-      if (staleHostDetected && !(await confirmLosingWork(`Restarting ${WINDOW_TITLE}`, "Restart").catch(() => true))) return;
-      try {
-        if (staleHostDetected) await ptyHost.restart();
-      } catch {
-        // best-effort; stale host may already be gone
-      }
-      app.relaunch();
-      app.quit();
-    },
-  };
-  const appMenu: MenuItemConstructorOptions = {
-    label: WINDOW_TITLE,
-    submenu: [
-      {
-        label: `About ${WINDOW_TITLE}`,
-        click: showAyaAboutPanel,
-      },
-      { type: "separator" },
-      {
-        label: "Settings...",
-        accelerator: "CmdOrCtrl+,",
-        click: () => dispatchShortcut("open-settings"),
-      },
-      restartItem,
-      { type: "separator" },
-      { role: "services" },
-      { type: "separator" },
-      { role: "hide" },
-      { role: "hideOthers" },
-      { role: "unhide" },
-      { type: "separator" },
-      { role: "quit" },
-    ],
-  };
-
-  const template: MenuItemConstructorOptions[] = [
-    ...(process.platform === "darwin" ? [appMenu] : []),
-    {
-      label: "File",
-      submenu: [
-        {
-          label: "New Shell",
-          accelerator: "CmdOrCtrl+T",
-          click: () => dispatchShortcut("new-shell"),
-        },
-        {
-          label: "New Window",
-          accelerator: "CmdOrCtrl+Shift+N",
-          click: () => void openNewWindow(),
-        },
-        {
-          label: "Close Terminal",
-          accelerator: "CmdOrCtrl+W",
-          click: () => dispatchShortcut("close-tab"),
-        },
-        ...(process.platform === "darwin"
-          ? []
-          : [
-              { type: "separator" as const },
-              restartItem,
-            ]),
-      ],
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "pasteAndMatchStyle" },
-        { role: "delete" },
-        { role: "selectAll" },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        {
-          label: "Search",
-          accelerator: "CmdOrCtrl+K",
-          click: () => dispatchShortcut("search"),
-        },
-        {
-          label: "Find in Terminal",
-          accelerator: "CmdOrCtrl+F",
-          click: () => dispatchShortcut("find-in-pane"),
-        },
-        { type: "separator" },
-        {
-          label: "Previous Terminal",
-          accelerator: "CmdOrCtrl+[",
-          click: () => dispatchShortcut("prev-tab"),
-        },
-        {
-          label: "Next Terminal",
-          accelerator: "CmdOrCtrl+]",
-          click: () => dispatchShortcut("next-tab"),
-        },
-        { type: "separator" },
-        {
-          label: "Focus Pane Left",
-          accelerator: "CmdOrCtrl+Alt+Left",
-          click: () => dispatchShortcut("focus-pane-left"),
-        },
-        {
-          label: "Focus Pane Right",
-          accelerator: "CmdOrCtrl+Alt+Right",
-          click: () => dispatchShortcut("focus-pane-right"),
-        },
-        {
-          label: "Focus Pane Up",
-          accelerator: "CmdOrCtrl+Alt+Up",
-          click: () => dispatchShortcut("focus-pane-up"),
-        },
-        {
-          label: "Focus Pane Down",
-          accelerator: "CmdOrCtrl+Alt+Down",
-          click: () => dispatchShortcut("focus-pane-down"),
-        },
-        {
-          label: "Split Pane Right",
-          accelerator: "CmdOrCtrl+Alt+\\",
-          click: () => dispatchShortcut("split-pane-right"),
-        },
-        {
-          label: "Split Pane Below",
-          accelerator: "CmdOrCtrl+Alt+-",
-          click: () => dispatchShortcut("split-pane-below"),
-        },
-        { type: "separator" },
-        { role: "toggleDevTools" },
-        { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
-        { type: "separator" },
-        {
-          label: "Toggle Full Screen",
-          accelerator:
-            process.platform === "darwin" ? "Ctrl+Command+F" : "F11",
-          click: () => toggleAyaFullScreen(focusedAyaWindow()),
-        },
-      ],
-    },
-    {
-      label: "Project",
-      submenu: Array.from({ length: MAX_KEYBOARD_PROJECTS }, (_, i) => ({
-        label: `Select Project ${i + 1}`,
-        accelerator: `CmdOrCtrl+${i + 1}`,
-        click: () => dispatchShortcut(`project-${i + 1}`),
-      })),
-    },
-    {
-      label: "Window",
-      submenu: [
-        { role: "minimize" },
-        { role: "zoom" },
-        ...(process.platform === "darwin"
-          ? [
-              { type: "separator" as const },
-              { role: "front" as const },
-              { type: "separator" as const },
-              { role: "window" as const },
-            ]
-          : [{ role: "close" as const }]),
-      ],
-    },
-  ];
-
-  if (process.platform !== "darwin") {
-    template.push({
-      label: "Help",
-      submenu: [
-        {
-          label: `About ${WINDOW_TITLE}`,
-          click: showAyaAboutPanel,
-        },
-      ],
-    });
-  }
-
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
+const applicationMenuDeps = {
+  app,
+  Menu,
+  nativeImage,
+  platform: process.platform,
+  windowTitle: WINDOW_TITLE,
+  maxKeyboardProjects: MAX_KEYBOARD_PROJECTS,
+  staleHostDetected: () => staleHostDetected,
+  confirmLosingWork,
+  ptyHost,
+  showAyaAboutPanel: () => showAyaAboutPanel(aboutPanelDeps),
+  dispatchShortcut,
+  openNewWindow,
+  focusedAyaWindow,
+  toggleAyaFullScreen,
+  configureAppIdentity,
+};
 
 interface WindowGeometry {
   x?: number;
@@ -2043,25 +999,22 @@ async function handleStaleHost(): Promise<void> {
   }
 }
 
-/** Restart to update (asks before stopping background work) and an ordinary quit's update (installs only past no
- *  background work, else leaves it for Restart to update). Markers are written for diagnoseRelaunch (#78). */
-const updates = updateInstaller({
-  status: getUpdateStatus,
-  relaunch: relaunchDeps,
-  ask: (text) => askRestart("Restart to update", text),
-  latch: updateLatch,
-  mark: markPendingUpdate,
-  markSync: markPendingUpdateSync,
-  clearMark: clearPendingUpdate,
-  // Lazy: electron-updater builds its platform updater on first touch, which must not happen at module load.
-  updater: {
-    get autoRunAppAfterInstall() { return autoUpdater.autoRunAppAfterInstall; },
-    set autoRunAppAfterInstall(value: boolean) { autoUpdater.autoRunAppAfterInstall = value; },
-    quitAndInstall: (isSilent, isForceRunAfter) => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
+const updates = createUpdates({
+  app,
+  autoUpdater: () => autoUpdater,
+  isDev: IS_DEV,
+  platform: process.platform,
+  env: process.env,
+  eachAyaWindow,
+  diagnosticsLog: { append: (event, fields) => diagnosticsLog.append(event, fields) },
+  dialog,
+  shell,
+  notifications: {
+    isSupported: () => Notification.isSupported(),
+    create: (options) => new Notification(options),
   },
-  quit: () => app.quit(),
-  failed: (message) => setUpdateStatus({ phase: "error", message }),
-  settleMs: QUIT_INSTALL_SETTLE_MS,
+  relaunchDeps,
+  askRestart,
 });
 
 /** The terminal host's state, the one account behind Aya's launch check, the Restart Aya red dot and Diagnostics. */
@@ -2115,25 +1068,11 @@ async function stopHosts(pids: number[]): Promise<number[]> {
 function showStaleHost(stale: boolean): void {
   staleHostDetected = stale;
   if (stale) {
-    setStaleMenuIcon();
+    setStaleMenuIcon(applicationMenuDeps);
     return;
   }
   const item = Menu.getApplicationMenu()?.getMenuItemById("restart-aya");
   if (item) item.icon = nativeImage.createEmpty();
-}
-
-/** Red dot on the "Restart Aya" menu item - the manual reap affordance (#52).
- *  No-op until the application menu is installed. */
-function setStaleMenuIcon(): void {
-  const item = Menu.getApplicationMenu()?.getMenuItemById("restart-aya");
-  if (item) {
-    // 16x16 px red dot at scaleFactor 2 = 8pt logical - renders as a
-    // small colored circle to the left of the label (standard macOS pattern).
-    item.icon = nativeImage.createFromBuffer(
-      makeCirclePng(STALE_MENU_DOT_PX, 255, 59, 48), // red (macOS systemRed #ff3b30)
-      { scaleFactor: STALE_MENU_DOT_SCALE_FACTOR },
-    );
-  }
 }
 
 /** Settings > Diagnostics > PTY host > Restart (and Aya Web): asks, then replaces the host. Throws when cancelled,
@@ -2253,6 +1192,7 @@ function registerIpc(): TeamRunner {
   // A question from before the restart that the pane's session no longer confirms: the windows mark it.
   onStatusPushed(broadcastStatus);
   registerUsageIpc(ipcMain);
+  const intelligenceDeps = { findExecutableOnPath };
   registerSettingsIpc({
     ipcMain,
     senderWindow,
@@ -2260,9 +1200,9 @@ function registerIpc(): TeamRunner {
     home: () => app.getPath("home"),
     presetsSaved: syncAntigravityBrief,
     intelligence: {
-      summarize: (req) => summarizeLocal(validateLocalSummaryRequest(req)),
-      ollamaStatus: (model) => ollamaStatus(model),
-      pullOllamaModel: (model) => pullOllamaModel(validateOllamaModelName(model)),
+      summarize: (req) => summarizeLocal(intelligenceDeps, validateLocalSummaryRequest(req)),
+      ollamaStatus: (model) => ollamaStatus(intelligenceDeps, model),
+      pullOllamaModel: (model) => pullOllamaModel(intelligenceDeps, validateOllamaModelName(model)),
     },
   });
 
@@ -2300,8 +1240,8 @@ function registerIpc(): TeamRunner {
     cliStatus,
     installCli,
     diagnosticsReport,
-    updateStatus: getUpdateStatus,
-    checkForUpdates,
+    updateStatus: updates.getUpdateStatus,
+    checkForUpdates: updates.checkForUpdates,
     installUpdate: () => updates.install(),
   });
 
@@ -2517,18 +1457,18 @@ app.whenReady().then(async () => {
   startupWindowCreated = true;
   const teamRunner = registerIpc();
   teamsAtQuit = teamRunner;
-  configureAutoUpdates(mainWindow);
+  updates.configureAutoUpdates(mainWindow);
   // Before checking for a NEW update, surface a PREVIOUS one that silently
   // failed to install and rolled back (#78).
-  void reconcilePendingUpdate(mainWindow);
+  void updates.reconcilePendingUpdate(mainWindow);
   // Live-follow Omarchy theme switches: re-broadcast so the renderer re-skins.
   const stopOmarchyWatch = watchOmarchyTheme(() => {
     eachAyaWindow((win) => win.webContents.send("omarchy:changed"));
   });
   app.once("before-quit", stopOmarchyWatch);
-  if (getUpdateStatus().supported) {
+  if (updates.getUpdateStatus().supported) {
     setTimeout(() => {
-      void checkForUpdates();
+      void updates.checkForUpdates();
     }, UPDATE_AUTO_CHECK_DELAY_MS);
   }
   startControlServer({
@@ -2599,11 +1539,11 @@ app.whenReady().then(async () => {
     .catch((err: unknown) => {
       webServerError = err instanceof Error ? err.message : String(err);
     });
-  installApplicationMenu();
+  installApplicationMenu(applicationMenuDeps);
 
   // The stale-host reconcile ran before the window (see above); the menu did
   // not exist yet, so apply the red "Restart Aya" affordance now if needed.
-  if (staleHostDetected) setStaleMenuIcon();
+  if (staleHostDetected) setStaleMenuIcon(applicationMenuDeps);
 
   // Phase-2 legacy sweep, deferred off the startup path: clean up what the
   // registry structurally can't reach - pre-registry stray hosts (no record
