@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sharingPaneIds } from "./agentPreset";
-import { projectBaseCwd, tabFromTerminal } from "./worktree";
+import { projectBaseCwd } from "./worktree";
 import { findStatusTarget } from "./control-status-target";
 import {
   applyReportedStatus,
@@ -8,26 +8,19 @@ import {
   controlLevelToTerminalStatus,
   controlStatusEventTitle,
 } from "./pty-event-reducer";
-import { forgetSpawn, wasSpawned } from "./spawnSession";
 import {
   applyExternalProjectEdits,
   mergeProjectsFromDisk,
 } from "./project-reload";
 import {
-  compactRecord,
-  dedupeSlugs,
-  defaultTabName,
   findProject,
   findProjectSlugForSession,
-  mergeGitInfo,
-  remoteTerminalCommand,
   samePollPayload,
   sameProjectBadges,
   sameSessionRecords,
   sessionDir,
   terminalSpawn,
   uniquePresetId,
-  uniqueProjectName,
   type MissingDirEntry,
   type NewProjectModalState,
   type PendingRepoImport,
@@ -48,16 +41,13 @@ import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalView } from "./components/TerminalView";
 import { TopBar } from "./components/TopBar";
-import {
-  DEFAULT_MAC_OPTION_KEY_MODE,
-  isMacOptionKeyMode,
-  type MacOptionKeyMode,
-} from "./terminal-option-key";
 import { useAppShortcuts } from "./hooks/useAppShortcuts";
 import { useDoubleShiftSearch } from "./hooks/useDoubleShiftSearch";
 import { usePtyEventRouter } from "./hooks/usePtyEventRouter";
 import { useStable } from "./hooks/useStableIdentity";
 import { sameArrayItems } from "./stable-identity";
+import { useProjectActions } from "./hooks/useProjectActions";
+import { useOpenQueue, useOpenQueueDrain } from "./hooks/useOpenQueue";
 import { useAppTheme } from "./hooks/useAppTheme";
 import { useConfigReload } from "./hooks/useConfigReload";
 import { EMPTY_SUMMARIES } from "./local-summaries";
@@ -71,57 +61,23 @@ import {
 } from "./hooks/useTerminalSignals";
 import { useTerminalSounds } from "./hooks/useTerminalSounds";
 import { useTeams } from "./hooks/useTeams";
+import { useProjectPersistence, useProjectSessionPersistence } from "./hooks/useProjectPersistence";
+import { useTerminalActions } from "./hooks/useTerminalActions";
+import { useSplitLayout, useSplitLayoutView } from "./hooks/useSplitLayout";
 import { useHarnessScan, useUsagePolling } from "./hooks/useUsagePolling";
 import { useWindowChrome } from "./hooks/useWindowChrome";
 import { pollVisible } from "./poll-visible";
 import { useGitHubLinkEffect, useGitStatus } from "./hooks/useGitStatus";
-import { PRESET_ID_SHELL } from "./preset-ids";
 import {
-  APP_THEME_STORAGE_KEY,
-  CUSTOM_DONE_SOUND_STORAGE_KEY,
-  CUSTOM_WAITING_SOUND_STORAGE_KEY,
-  HARNESS_SEARCH_STORAGE_KEY,
-  LAYOUT_MODE_STORAGE_KEY,
-  MAC_OPTION_KEY_STORAGE_KEY,
   NO_HARNESS_HINT_DISMISSED_STORAGE_KEY,
-  SOUND_OVERRIDES_STORAGE_KEY,
-  STATUSBAR_GITHUB_LINK_STORAGE_KEY,
-  STATUS_RAIL_COLLAPSED_STORAGE_KEY,
-  TERMINAL_FONT_FAMILY_STORAGE_KEY,
-  TERMINAL_SOUNDS_STORAGE_KEY,
-  USAGE_HARNESS_NAME_STORAGE_KEY,
-  WORKTREES_STORAGE_KEY,
   repoConfigIgnoredKey,
 } from "./storage-keys";
 import { GPU_RELAUNCHED_EVENT } from "./window-events";
 import { uuid } from "./uuid";
 import { normalizeSoundOverrides } from "./terminal-sound-prefs";
-import { SCREEN_WAITING_DETAIL } from "./attention";
-import {
-  MAX_SPLIT_LEAVES,
-  assignTerminal,
-  compactTree,
-  dividerRects,
-  findLeafByTerminal,
-  focusDirection,
-  layoutRects,
-  leaf,
-  leafCount,
-  leaves,
-  normalizeTreeForTabs,
-  removeTerminal,
-  resizeSplit as resizeSplitNode,
-  splitLeaf,
-  projectSplitTree,
-  resolveActiveLeafId,
-  type SplitNode,
-} from "./split-tree";
-import {
-  boolPreference,
-  enumPreference,
-  usePersistentPreference,
-  type PreferenceCodec,
-} from "./hooks/usePersistentPreference";
+import { findLeafByTerminal, normalizeTreeForTabs, projectSplitTree } from "./split-tree";
+import { useAppPreferences, useAppPreferenceActions } from "./hooks/useAppPreferences";
+import { useProjectTimeline, usePtyTimelineEvents } from "./hooks/useProjectTimeline";
 import { waitingPanesOf } from "./team-view";
 import { calculateProjectBadges } from "./project-badges";
 import {
@@ -129,103 +85,26 @@ import {
   calculateVisibleTerminalIds,
 } from "./terminal-visibility";
 import {
-  BUILTIN_SHELL,
   WAITING_ON,
   type Snippet,
   getPreset,
-  type LayoutMode,
-  type ProjectEvent,
   type Preset,
-  type PtyEvent,
   type ProjectCollectionState,
   type ProjectConfig,
-  type RemoteProjectCreateResult,
   type TerminalState,
   type WaitingPanes,
   type Theme,
   type ThemeColors,
-  type WorkingTab,
 } from "./types";
 
-// Cap on retained entries in the project event timeline.
-const MAX_PROJECT_EVENTS = 200;
 // Cap on preset suggestions offered during repo preset import.
 const MAX_SUGGESTED_PRESETS = 8;
 const DEFAULT_SIDEBAR_WIDTH_PX = 240;
 const DEFAULT_RAIL_WIDTH_PX = 220;
 
 const TERMINAL_FONT_SIZE_PX = 13;
-/** Leaf id for the synthetic one-pane tree used when a project has no stored
- *  split (or is showing a single terminal). Constant so React keys and focus
- *  stay stable across renders. */
-const SINGLE_VIEW_LEAF_ID = "single";
 const WARM_PROJECT_TERMINAL_CACHE_SIZE = 4;
-// Debounce for the single project-state disk writer (the #18 race fix).
-const PROJECT_STATE_SAVE_DEBOUNCE_MS = 150;
 
-type AppThemePreference = "system" | "light" | "dark" | "omarchy";
-
-
-
-// localStorage codecs for the simple preferences (see usePersistentPreference).
-const THEME_CODEC = enumPreference<AppThemePreference>(
-  ["system", "light", "dark", "omarchy"],
-  "system",
-);
-const MAC_OPTION_CODEC: PreferenceCodec<MacOptionKeyMode> = {
-  fallback: DEFAULT_MAC_OPTION_KEY_MODE,
-  parse: (raw) => (isMacOptionKeyMode(raw) ? raw : DEFAULT_MAC_OPTION_KEY_MODE),
-  serialize: (v) => v,
-};
-// "classic" (default): project tabs on top, terminal list left.
-// "projects-left": project tabs in a left rail, terminal tabs on top.
-const LAYOUT_CODEC = enumPreference<LayoutMode>(
-  ["classic", "projects-left"],
-  "classic",
-);
-// Harness names show by default; the PR/branch link is opt-in (needs gh).
-const HARNESS_NAME_CODEC = boolPreference(true);
-const GITHUB_LINK_CODEC = boolPreference(false);
-// Experimental: git worktree support (detect + group + launch/create in worktrees).
-const WORKTREES_CODEC = boolPreference(false);
-// Experimental: Cmd+F "History" mode searching Claude/Codex session
-// transcripts on disk for the tab's cwd.
-const HARNESS_SEARCH_CODEC = boolPreference(false);
-// Waiting/done chimes default on; the settings toggle is an opt-out.
-const TERMINAL_SOUNDS_CODEC = boolPreference(true);
-// The status rail starts expanded — it only renders at all when something
-// actually needs attention, so hiding it by default would defeat the point.
-const STATUS_RAIL_COLLAPSED_CODEC = boolPreference(false);
-// Per-preset chime exceptions ({presetId: false}) and custom audio paths.
-// Stored as JSON because they're maps/nullable strings, not flags.
-const SOUND_OVERRIDES_CODEC: PreferenceCodec<Record<string, boolean>> = {
-  fallback: {},
-  parse: (raw) => {
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return {};
-      }
-      const out: Record<string, boolean> = {};
-      for (const [key, value] of Object.entries(parsed)) {
-        if (typeof value === "boolean") out[key] = value;
-      }
-      return out;
-    } catch {
-      return {};
-    }
-  },
-  serialize: (value) => JSON.stringify(value),
-};
-const SOUND_PATH_CODEC: PreferenceCodec<string | null> = {
-  fallback: null,
-  parse: (raw) => (raw.trim() ? raw : null),
-  serialize: (value) => value ?? "",
-};
-
-function readTerminalFontFamily(): string {
-  return localStorage.getItem(TERMINAL_FONT_FAMILY_STORAGE_KEY) ?? "";
-}
 
 
 export function App() {
@@ -248,7 +127,7 @@ export function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [warmProjectSlugs, setWarmProjectSlugs] = useState<string[]>([]);
   const [terminals, setTerminals] = useState<Record<string, TerminalState>>({});
-  const [projectEvents, setProjectEvents] = useState<ProjectEvent[]>([]);
+  const { projectEvents, appendProjectEvent } = useProjectTimeline();
   const [activeTabByProject, setActiveTabByProject] = useState<
     Record<string, string | null>
   >({});
@@ -277,48 +156,34 @@ export function App() {
   >({});
   const [homeDir, setHomeDir] = useState<string>("");
   const [showSettings, setShowSettings] = useState(false);
-  const [appThemePreference, setAppThemePreference] = usePersistentPreference(
-    APP_THEME_STORAGE_KEY,
-    THEME_CODEC,
-  );
-  const [macOptionKeyMode, setMacOptionKeyMode] = usePersistentPreference(
-    MAC_OPTION_KEY_STORAGE_KEY,
-    MAC_OPTION_CODEC,
-  );
-  const [terminalFontFamily, setTerminalFontFamily] =
-    useState(readTerminalFontFamily);
-  const [showUsageHarnessName, setShowUsageHarnessName] =
-    usePersistentPreference(USAGE_HARNESS_NAME_STORAGE_KEY, HARNESS_NAME_CODEC);
-  const [showGitHubLink, setShowGitHubLink] = usePersistentPreference(
-    STATUSBAR_GITHUB_LINK_STORAGE_KEY,
-    GITHUB_LINK_CODEC,
-  );
-  const [layoutMode, setLayoutMode] = usePersistentPreference(
-    LAYOUT_MODE_STORAGE_KEY,
-    LAYOUT_CODEC,
-  );
-  const [worktreesEnabled, setWorktreesEnabled] = usePersistentPreference(
-    WORKTREES_STORAGE_KEY,
-    WORKTREES_CODEC,
-  );
-  const [harnessSearchEnabled, setHarnessSearchEnabled] =
-    usePersistentPreference(HARNESS_SEARCH_STORAGE_KEY, HARNESS_SEARCH_CODEC);
-  const [terminalSoundsEnabled, setTerminalSoundsEnabled] =
-    usePersistentPreference(TERMINAL_SOUNDS_STORAGE_KEY, TERMINAL_SOUNDS_CODEC);
-  const [statusRailCollapsed, setStatusRailCollapsed] = usePersistentPreference(
-    STATUS_RAIL_COLLAPSED_STORAGE_KEY,
-    STATUS_RAIL_COLLAPSED_CODEC,
-  );
-  const [terminalSoundOverrides, setTerminalSoundOverrides] =
-    usePersistentPreference(SOUND_OVERRIDES_STORAGE_KEY, SOUND_OVERRIDES_CODEC);
-  const [customWaitingSound, setCustomWaitingSound] = usePersistentPreference(
-    CUSTOM_WAITING_SOUND_STORAGE_KEY,
-    SOUND_PATH_CODEC,
-  );
-  const [customDoneSound, setCustomDoneSound] = usePersistentPreference(
-    CUSTOM_DONE_SOUND_STORAGE_KEY,
-    SOUND_PATH_CODEC,
-  );
+  const {
+    appThemePreference,
+    setAppThemePreference,
+    macOptionKeyMode,
+    setMacOptionKeyMode,
+    terminalFontFamily,
+    setTerminalFontFamily,
+    showUsageHarnessName,
+    setShowUsageHarnessName,
+    showGitHubLink,
+    setShowGitHubLink,
+    layoutMode,
+    setLayoutMode,
+    worktreesEnabled,
+    setWorktreesEnabled,
+    harnessSearchEnabled,
+    setHarnessSearchEnabled,
+    terminalSoundsEnabled,
+    setTerminalSoundsEnabled,
+    statusRailCollapsed,
+    setStatusRailCollapsed,
+    terminalSoundOverrides,
+    setTerminalSoundOverrides,
+    customWaitingSound,
+    setCustomWaitingSound,
+    customDoneSound,
+    setCustomDoneSound,
+  } = useAppPreferences();
   const [railWidth, setRailWidth] = useState(DEFAULT_RAIL_WIDTH_PX);
   const terminalsRef = useRef(terminals);
   const projectsRef = useRef(projects);
@@ -397,51 +262,12 @@ export function App() {
   const { usageAccounts, codexUsageAccounts, grokUsage, monitoredSessions } =
     useUsagePolling(samePollPayload);
 
-  // Handle "open this directory" requests from main — fired by `aya <dir>`
-  // CLI invocations and the initial argv. Subscribed once; uses a ref to
-  // always see the latest projects + handlers without resubscribing. The
-  // preload holds opens sent before this subscribes and hands them over here.
-  //
-  // The IPC can arrive on `did-finish-load`, which is BEFORE the bootstrap
-  // useEffect has populated projects state. If we processed it then, the
-  // "find by directory" check sees an empty list and falls through to
-  // auto-create — producing a duplicate next to whatever bootstrap loads.
-  // So requests queue until bootstrap signals ready, then run one at a time.
-  const openProjectRef = useRef<(dir: string) => Promise<void>>(async () => {});
-  const [openQueue, setOpenQueue] = useState<string[]>([]);
-  const openRunningRef = useRef(false);
-  // Opens the page finished but whose project state the writer below has not saved:
-  // main sends them again after a reload until this page says they are on disk.
-  const unsavedOpensRef = useRef<string[]>([]);
-  const [unsavedOpensTick, setUnsavedOpensTick] = useState(0);
-  useEffect(() => {
-    return window.aya.onOpenProject((dir) => {
-      setOpenQueue((queue) => [...queue, dir]);
-    });
-  }, []);
+  const { openProjectRef, unsavedOpensRef, unsavedOpensTick, drain: openQueueDrain } =
+    useOpenQueue();
 
   const { foundHarnessCount, harnessScanDone } = useHarnessScan();
 
-  // Drain the open-project queue once bootstrap commits. Running this in a
-  // useEffect (not inline after setDidBootstrap) guarantees React has flushed
-  // setProjects → projectsRef.current before the handler tries to match by
-  // directory. Without this gate the drain raced the commit and "aya <known
-  // project path>" auto-created a duplicate, hitting the slug-collision error.
-  // One open per commit for the same reason: two concurrent opens each built on
-  // the same stale project list, and the second dropped the first.
-  useEffect(() => {
-    if (!didBootstrap || openRunningRef.current || openQueue.length === 0) return;
-    openRunningRef.current = true;
-    const dir = openQueue[0];
-    void openProjectRef.current(dir).catch((err) => {
-      console.warn(`[aya] could not open ${dir}:`, err);
-    }).finally(() => {
-      unsavedOpensRef.current.push(dir);
-      setUnsavedOpensTick((tick) => tick + 1);
-      openRunningRef.current = false;
-      setOpenQueue((queue) => queue.slice(1));
-    });
-  }, [didBootstrap, openQueue]);
+  useOpenQueueDrain({ didBootstrap, ...openQueueDrain });
 
   const {
     isFullScreen,
@@ -532,73 +358,11 @@ export function App() {
     ].slice(0, WARM_PROJECT_TERMINAL_CACHE_SIZE));
   }, [activeProjectId]);
 
-  const appendProjectEvent = useCallback(
-    (event: Omit<ProjectEvent, "id" | "createdAt"> & { createdAt?: number }) => {
-      setProjectEvents((prev) => [
-        {
-          ...event,
-          id: uuid(),
-          createdAt: event.createdAt ?? Date.now(),
-        },
-        ...prev,
-      ].slice(0, MAX_PROJECT_EVENTS));
-    },
-    [],
-  );
-
-  const handlePtyTimelineEvent = useCallback(
-    (event: PtyEvent) => {
-      const terminal = terminalsRef.current[event.ptyId];
-      if (!terminal) return;
-      if (event.type === "data" && !event.replay) {
-        rememberTerminalOutput(event.ptyId, event.chunk);
-      }
-      if (event.type === "spawn-failed") {
-        appendProjectEvent({
-          projectSlug: terminal.projectSlug,
-          terminalId: terminal.id,
-          level: "error",
-          title: `${terminal.name} failed to launch`,
-          detail: event.detail,
-        });
-        return;
-      }
-      if (event.type === "exit") {
-        appendProjectEvent({
-          projectSlug: terminal.projectSlug,
-          terminalId: terminal.id,
-          level: event.exitCode === 0 ? "done" : "error",
-          title:
-            event.exitCode === 0
-              ? `${terminal.name} exited`
-              : `${terminal.name} exited with error`,
-          detail: `exit ${event.exitCode}`,
-        });
-        return;
-      }
-      if (event.type === "vt-status" && event.waiting) {
-        appendProjectEvent({
-          projectSlug: terminal.projectSlug,
-          terminalId: terminal.id,
-          level: "waiting",
-          title: `${terminal.name} is waiting`,
-          detail: event.dialog ?? SCREEN_WAITING_DETAIL,
-        });
-        return;
-      }
-      if (event.type === "osc-status") {
-        appendProjectEvent({
-          projectSlug: terminal.projectSlug,
-          terminalId: terminal.id,
-          level: event.level === "active" ? "active" : event.level,
-          title: controlStatusEventTitle(terminal.name, event.level),
-          detail: event.text,
-          createdAt: event.updatedAt,
-        });
-      }
-    },
-    [appendProjectEvent, rememberTerminalOutput],
-  );
+  const { handlePtyTimelineEvent } = usePtyTimelineEvents({
+    terminalsRef,
+    rememberTerminalOutput,
+    appendProjectEvent,
+  });
 
   const { lastActivityRef, recentlyActiveIds } = useRecentTerminalActivity();
   useDockBadge(terminals);
@@ -619,274 +383,34 @@ export function App() {
     onSelectTerminal: focusTerminalFromNotification,
   });
 
-  // Update the order/open/recent collection state. Persistence is centralised in
-  // the single writer effect below, so this only updates in-memory state — it
-  // never writes to disk itself (no scattered saves that can race or drop
-  // fields). The active project / terminal / view live in their own state and
-  // are persisted by the same writer.
-  const updateProjectCollection = useCallback(
-    (next: ProjectCollectionState) => {
-      setProjectState({
-        version: PROJECT_STATE_VERSION,
-        order: dedupeSlugs(next.order),
-        open: dedupeSlugs(next.open),
-        recent: dedupeSlugs(next.recent),
-      });
-    },
-    [],
-  );
-
-  // === Single persistence owner for projects-state.json ===
-  // Everything that can change the persisted UI state — order/open/recent AND
-  // the active project / terminal / view — flows through here and nowhere else.
-  // Before this, the file was written from several places (bootstrap, the
-  // collection setter, per-feature handlers); they raced, and because each
-  // hand-built the payload, the active selections were dropped — that's the
-  // root of #18. One debounced writer, keyed on all the inputs, makes the disk
-  // a pure function of state and removes the race by construction.
-  useEffect(() => {
-    if (!didBootstrap) return;
-    const savedWithThisState = [...unsavedOpensRef.current];
-    const handle = window.setTimeout(() => {
-      void window.aya
-        .saveProjectState({
-          version: PROJECT_STATE_VERSION,
-          order: projectState.order,
-          open: projectState.open,
-          recent: projectState.recent,
-          activeProject: activeProjectId,
-          activeTab: compactRecord(activeTabByProject),
-          singleView: compactRecord(singleViewByProject),
-        })
-        .then(() => {
-          for (const dir of savedWithThisState) {
-            const at = unsavedOpensRef.current.indexOf(dir);
-            if (at === -1) continue;
-            unsavedOpensRef.current.splice(at, 1);
-            window.aya.openProjectDone(dir);
-          }
-        });
-    }, PROJECT_STATE_SAVE_DEBOUNCE_MS);
-    return () => window.clearTimeout(handle);
-  }, [
-    didBootstrap,
-    projectState,
-    activeProjectId,
-    activeTabByProject,
-    singleViewByProject,
-    unsavedOpensTick,
-  ]);
-
-  // Hydration helper — instantiates TerminalStates for a project's saved tabs.
-  // Pulled out of bootstrap so the missing-dir modal can defer hydration until
-  // the user decides what to do.
-  const hydrateProjectTerminals = useCallback(
-    (project: ProjectConfig, effectiveCwd: string) => {
-      setTerminals((prev) => {
-        const next = { ...prev };
-        for (const tab of project.tabs) {
-          next[tab.id] = {
-            id: tab.id,
-            projectSlug: project.slug,
-            presetId: tab.presetId,
-            name: tab.name,
-            // Restore the tab's worktree cwd if it had one, else the project dir.
-            cwd: tab.cwd ?? effectiveCwd,
-            status: "running",
-            bell: false,
-            exitCode: null,
-            restored: true,
-            ...(tab.sessionId ? { sessionId: tab.sessionId } : {}),
-            ...(tab.sharedDir ? { sharedDir: true as const } : {}),
-            ...(tab.teamLaunch ? { teamLaunch: true } : {}),
-            ...(tab.sshTarget ? { sshTarget: tab.sshTarget } : {}),
-          };
-        }
-        return next;
-      });
-      // Default the active tab to the first one ONLY when this project has no
-      // valid active tab yet. A restored selection (set from the persisted
-      // activeTab on boot) must survive hydration — clobbering it here is what
-      // reset the active terminal to the first tab on restart (#18).
-      setActiveTabByProject((prev) => {
-        const existing = prev[project.slug];
-        const stillValid =
-          !!existing && project.tabs.some((t) => t.id === existing);
-        return {
-          ...prev,
-          [project.slug]: stillValid ? existing : (project.tabs[0]?.id ?? null),
-        };
-      });
-    },
-    [],
-  );
-
-  useEffect(() => {
-    (async () => {
-      const [
-        cwd,
-        loadedProjects,
-        loadedProjectState,
-        loadedPresets,
-        home,
-        loadedThemes,
-        loadedSnippets,
-      ] =
-        await Promise.all([
-          window.aya.getCwd(),
-          window.aya.listProjects(),
-          window.aya.listProjectState(),
-          window.aya.listPresets(),
-          window.aya.getHomeDir(),
-          window.aya.listThemes(),
-          window.aya.listSnippets(),
-        ]);
-      setPresets(loadedPresets);
-      setDefaultPresets(loadedPresets);
-      setSnippets(loadedSnippets);
-      setHomeDir(home);
-      setThemes(loadedThemes.themes);
-      setActiveThemeId(loadedThemes.activeId);
-
-      const fallbackPreset = loadedPresets[0] ?? BUILTIN_SHELL;
-
-      // Auto-add a shell tab to projects that have none (and persist).
-      const seededProjects: ProjectConfig[] = [];
-      for (const project of loadedProjects) {
-        if (project.tabs.length === 0) {
-          const shellTab: WorkingTab = {
-            id: uuid(),
-            presetId: fallbackPreset.id,
-            name: defaultTabName(fallbackPreset),
-          };
-          const updated = { ...project, tabs: [shellTab] };
-          seededProjects.push(updated);
-          void window.aya.updateProject(updated);
-        } else {
-          seededProjects.push(project);
-        }
-      }
-      setAllProjects(seededProjects);
-      const seededSlugs = new Set(seededProjects.map((p) => p.slug));
-      const order =
-        loadedProjectState.order.length > 0
-          ? loadedProjectState.order
-          : seededProjects.map((p) => p.slug);
-      const open =
-        loadedProjectState.open.length > 0
-          ? loadedProjectState.open
-          : loadedProjectState.secondaryWindow
-            ? [] // an empty secondary window is intentional, not a first run
-            : seededProjects.map((p) => p.slug);
-      const recent =
-        loadedProjectState.recent.length > 0 ? loadedProjectState.recent : order;
-      // Restore the persisted active selections, but validate them against the
-      // projects/terminals that actually exist now — a deleted project or tab
-      // must not leave the active pointer dangling (it would fall through to a
-      // stale id instead of the first tab).
-      const savedActiveTab = loadedProjectState.activeTab ?? {};
-      const savedSingleView = loadedProjectState.singleView ?? {};
-      const validActiveTab: Record<string, string> = {};
-      const validSingleView: Record<string, string> = {};
-      for (const p of seededProjects) {
-        const tabIds = new Set(p.tabs.map((t) => t.id));
-        if (tabIds.has(savedActiveTab[p.slug])) {
-          validActiveTab[p.slug] = savedActiveTab[p.slug];
-        }
-        if (tabIds.has(savedSingleView[p.slug])) {
-          validSingleView[p.slug] = savedSingleView[p.slug];
-        }
-      }
-      const savedActiveProject =
-        loadedProjectState.activeProject &&
-        seededSlugs.has(loadedProjectState.activeProject)
-          ? loadedProjectState.activeProject
-          : null;
-
-      const normalizedState: ProjectCollectionState = {
-        version: PROJECT_STATE_VERSION,
-        order: dedupeSlugs(order).filter((slug) => seededSlugs.has(slug)),
-        open: dedupeSlugs(open).filter((slug) => seededSlugs.has(slug)),
-        recent: dedupeSlugs(recent).filter((slug) => seededSlugs.has(slug)),
-        activeProject: savedActiveProject,
-        activeTab: validActiveTab,
-        singleView: validSingleView,
-      };
-      // Seed in-memory state; the single writer effect persists it once
-      // didBootstrap flips (no direct save here — that used to race the writer).
-      setProjectState(normalizedState);
-      setActiveTabByProject(validActiveTab);
-      setSingleViewByProject(validSingleView);
-      const openSlugSet = new Set(normalizedState.open);
-      const openProjects = seededProjects.filter((p) => openSlugSet.has(p.slug));
-      setProjects(openProjects);
-
-      // Validate each project's directory in parallel.
-      const dirChecks = await Promise.all(
-        openProjects.map((p) =>
-          p.remote ? Promise.resolve(true) : window.aya.dirExists(p.directory),
-        ),
-      );
-      const queue: MissingDirEntry[] = [];
-      for (let i = 0; i < openProjects.length; i++) {
-        const project = openProjects[i];
-        if (project.remote) {
-          hydrateProjectTerminals(project, project.remote.directory);
-          void window.aya
-            .listRemotePresets(project.remote.sshTarget)
-            .then((remotePresets) => {
-              setRemotePresetsByProject((prev) => ({
-                ...prev,
-                [project.slug]: remotePresets,
-              }));
-            })
-            .catch(() => undefined);
-          continue;
-        }
-        if (dirChecks[i]) {
-          // Dir exists — hydrate terminals normally.
-          hydrateProjectTerminals(project, project.directory);
-        } else {
-          // Missing dir — defer hydration until the user decides.
-          queue.push({
-            slug: project.slug,
-            name: project.name,
-            directory: project.directory,
-          });
-        }
-      }
-      setMissingDirQueue(queue);
-
-      const cwdProject = openProjects.find((p) => p.directory === cwd);
-      if (cwdProject) {
-        // An explicit `aya <dir>` launch still wins over the saved selection.
-        setActiveProjectId(cwdProject.slug);
-      } else if (savedActiveProject && openSlugSet.has(savedActiveProject)) {
-        setActiveProjectId(savedActiveProject);
-      } else if (openProjects.length > 0) {
-        setActiveProjectId(openProjects[0].slug);
-      } else {
-        setActiveProjectId(null);
-      }
-
-      for (const p of openProjects) {
-        if (!p.remote && dirChecks[openProjects.indexOf(p)]) {
-          void window.aya.getGitInfo(p.directory).then((info) => {
-            setGit((g) => mergeGitInfo(g, p.directory, info));
-          });
-        }
-      }
-
-      // Bootstrap fully resolved — flip didBootstrap. The drain runs in a
-      // separate useEffect keyed on didBootstrap, which fires AFTER React
-      // commits the setProjects above and updates projectsRef.current. A
-      // setTimeout(0) here would race with that commit and find an empty
-      // projectsRef, causing `aya <existingProjectPath>` to fall through to
-      // create-new with a colliding slug ("Project 'agent' already exists").
-      setDidBootstrap(true);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const { updateProjectCollection, hydrateProjectTerminals, persistProject } =
+    useProjectPersistence({
+      didBootstrap,
+      projectState,
+      activeProjectId,
+      activeTabByProject,
+      singleViewByProject,
+      unsavedOpensTick,
+      unsavedOpensRef,
+      projectsRef,
+      setProjectState,
+      setTerminals,
+      setActiveTabByProject,
+      setPresets,
+      setDefaultPresets,
+      setSnippets,
+      setHomeDir,
+      setThemes,
+      setActiveThemeId,
+      setAllProjects,
+      setSingleViewByProject,
+      setProjects,
+      setRemotePresetsByProject,
+      setMissingDirQueue,
+      setActiveProjectId,
+      setGit,
+      setDidBootstrap,
+    });
 
   usePtyEventRouter({
     currentTerminalsRef: terminalsRef,
@@ -978,424 +502,69 @@ export function App() {
     };
   }, [activeProjectId, didBootstrap]);
 
-  const persistProject = useCallback(
-    (slug: string, nextTerminals: Record<string, TerminalState>) => {
-      const project = projectsRef.current.find((p) => p.slug === slug);
-      if (!project) return;
-      const tabs: WorkingTab[] = Object.values(nextTerminals)
-        .filter((t) => t.projectSlug === slug)
-        .map((t) => tabFromTerminal(t, projectBaseCwd(project)));
-      const tree = projectSplitTree(project);
-      const splitTree = tree
-        ? compactTree(
-            normalizeTreeForTabs(
-              tree,
-              new Set(tabs.map((tab) => tab.id)),
-              tabs[0]?.id ?? null,
-              uuid(),
-            ),
-          )
-        : undefined;
-      const updated: ProjectConfig = {
-        ...project,
-        tabs,
-        // The legacy grid is dropped on the first save after migration.
-        splitLayout: undefined,
-        ...(splitTree ? { splitTree } : { splitTree: undefined }),
-      };
-      setAllProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-      setProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-      void window.aya.updateProject(updated);
-    },
-    [],
-  );
+  useProjectSessionPersistence({ terminals, didBootstrap, terminalsRef, persistProject });
 
-  // A session id or sharedDir mark arrives while a terminal is already running,
-  // so it needs its own persist trigger - the others (launch, rename, close) may
-  // never fire again before the app quits, and an unsaved one means the next
-  // restore may fall back to "latest session".
-  const sessionIdSignature = Object.values(terminals)
-    .filter((t) => t.sessionId || t.sharedDir)
-    .map((t) => `${t.id}:${t.sessionId}:${t.sharedDir}`)
-    .sort()
-    .join("\n");
-  useEffect(() => {
-    if (!didBootstrap || !sessionIdSignature) return;
-    const slugs = new Set(
-      Object.values(terminalsRef.current)
-        .filter((t) => t.sessionId || t.sharedDir)
-        .map((t) => t.projectSlug),
-    );
-    for (const slug of slugs) persistProject(slug, terminalsRef.current);
-  }, [sessionIdSignature, didBootstrap, persistProject]);
+  const {
+    updateProjectSplitTree,
+    assignTerminalToActiveSplitCell,
+    assignTerminalToSplitCell,
+    collapseToSingleTerminal,
+    removeTerminalFromSplit,
+    setActiveSplitCell,
+    resizeSplit,
+    focusSplitPane,
+    splitActivePane,
+    splitTerminalRight,
+    splitTerminalBelow,
+  } = useSplitLayout({
+    projectsRef,
+    terminalsRef,
+    splitEnabledRef,
+    activeProjectId,
+    activeTabByProject,
+    activeLeafByProject,
+    singleViewByProject,
+    setSingleViewByProject,
+    setAllProjects,
+    setProjects,
+    setActiveLeafByProject,
+    setActiveTabByProject,
+    setTerminals,
+    setCloseFocusHold,
+  });
 
-  /** The single write funnel for a project's pane layout. `updater` gets a
-   *  tree already reconciled against the project's live tabs and the id of the
-   *  focused pane, and returns the next tree (optionally moving focus). */
-  const updateProjectSplitTree = useCallback(
-    (
-      slug: string,
-      updater: (
-        tree: SplitNode,
-        activeLeafId: string,
-        project: ProjectConfig,
-      ) => { tree: SplitNode; activeLeafId?: string },
-    ) => {
-      const project = projectsRef.current.find((p) => p.slug === slug);
-      if (!project) return;
-      const fallbackId = activeTabByProject[slug] ?? project.tabs[0]?.id ?? null;
-      const tabIds = new Set(project.tabs.map((tab) => tab.id));
-      const current = normalizeTreeForTabs(
-        projectSplitTree(project),
-        tabIds,
-        fallbackId,
-        uuid(),
-      );
-      const currentActive = resolveActiveLeafId(
-        current,
-        activeLeafByProject[slug],
-        fallbackId,
-      );
-      const result = updater(current, currentActive, project);
-      const normalized = normalizeTreeForTabs(result.tree, tabIds, fallbackId, uuid());
-      const splitTree = compactTree(normalized);
-      const updated: ProjectConfig = {
-        ...project,
-        splitLayout: undefined,
-        ...(splitTree ? { splitTree } : { splitTree: undefined }),
-      };
-      setSingleViewByProject((prev) => ({ ...prev, [slug]: null }));
-      setAllProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-      setProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-      void window.aya.updateProject(updated);
-      // The requested pane may have been collapsed away by normalization, so
-      // resolve against the tree that actually survived.
-      const nextActive = resolveActiveLeafId(
-        normalized,
-        result.activeLeafId ?? currentActive,
-        fallbackId,
-      );
-      setActiveLeafByProject((prev) => ({ ...prev, [slug]: nextActive }));
-      const activeTerminalId = leaves(normalized).find((l) => l.id === nextActive)
-        ?.terminalId;
-      if (activeTerminalId) {
-        setActiveTabByProject((prev) => ({ ...prev, [slug]: activeTerminalId }));
-      }
-    },
-    [activeTabByProject, activeLeafByProject],
-  );
-
-  /** Resolve the effective cwd for a project at terminal-launch time. Honors
-   *  any session fallback (e.g. "Use home for now"). */
-  const effectiveCwd = useCallback(
-    (project: ProjectConfig): string => {
-      return projectFallbacks[project.slug] ?? project.directory;
-    },
-    [projectFallbacks],
-  );
-
-  const launchTerminal = useCallback(
-    (preset: Preset, cwd?: string, sshTarget?: string) => {
-      const slug = activeProjectIdRef.current;
-      if (!slug) return;
-      const project = findProject(projectsRef.current, slug);
-      if (!project) return;
-      const id = uuid();
-      const command = remoteTerminalCommand(project, preset);
-      // Default the new tab's display name to the preset's current name (not
-      // its id, which stays the same when the user renames a preset).
-      const term: TerminalState = {
-        id,
-        projectSlug: slug,
-        presetId: preset.id,
-        name: sshTarget ? `ssh ${sshTarget}` : defaultTabName(preset),
-        cwd:
-          cwd ??
-          (project.remote ? project.remote.directory : effectiveCwd(project)),
-        status: "running",
-        bell: false,
-        exitCode: null,
-        ...(sshTarget ? { sshTarget } : {}),
-      };
-      setTerminals((prev) => {
-        const next = { ...prev, [id]: term };
-        const tabs: WorkingTab[] = Object.values(next)
-          .filter((t) => t.projectSlug === slug)
-          .map((t) => tabFromTerminal(t, projectBaseCwd(project)));
-        // In the projects-left layout splits are disabled, so leave the saved
-        // tree untouched (don't claim a pane for the new terminal, and don't
-        // clear it) - it should come back unchanged in the classic layout.
-        const existingTree = projectSplitTree(project);
-        const currentTree =
-          splitEnabledRef.current && existingTree
-            ? normalizeTreeForTabs(
-                existingTree,
-                new Set(tabs.map((tab) => tab.id)),
-                activeTabByProject[slug] ?? project.tabs[0]?.id ?? null,
-                uuid(),
-              )
-            : null;
-        const splitTree = currentTree
-          ? compactTree(
-              assignTerminal(
-                currentTree,
-                resolveActiveLeafId(
-                  currentTree,
-                  activeLeafByProject[slug],
-                  activeTabByProject[slug] ?? null,
-                ),
-                id,
-              ),
-            )
-          : undefined;
-        const updated: ProjectConfig = {
-          ...project,
-          tabs,
-          ...(splitEnabledRef.current
-            ? { splitLayout: undefined, ...(splitTree ? { splitTree } : { splitTree: undefined }) }
-            : {}),
-        };
-        setAllProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-        setProjects((ps) => ps.map((p) => (p.slug === slug ? updated : p)));
-        void window.aya.updateProject(updated);
-        return next;
-      });
-      setActiveTabByProject((prev) => ({ ...prev, [slug]: id }));
-      setSingleViewByProject((prev) => ({
-        ...prev,
-        [slug]: projectSplitTree(project) && prev[slug] ? id : null,
-      }));
-      appendProjectEvent({
-        projectSlug: slug,
-        terminalId: id,
-        level: "active",
-        title: `${term.name} started`,
-        detail: command,
-      });
-    },
-    [activeTabByProject, activeLeafByProject, appendProjectEvent, effectiveCwd],
-  );
-
-  // aya team open / Apply panes: main picked the ids and assigns the roles
-  // once the project is saved with the new tabs.
-  useEffect(
-    () =>
-      window.aya.onTeamOpenPanes(({ requestId, projectSlug, panes }) => {
-        const open = async () => {
-          const project = findProject(projectsRef.current, projectSlug);
-          if (!project) throw new Error(`project ${projectSlug} is not open in this window`);
-          const added: Record<string, TerminalState> = {};
-          for (const pane of panes) {
-            if (!presetsRef.current.some((p) => p.id === pane.presetId)) throw new Error(`no preset "${pane.presetId}" in this window`);
-            added[pane.id] = {
-              id: pane.id,
-              projectSlug,
-              presetId: pane.presetId,
-              name: pane.name,
-              cwd: effectiveCwd(project),
-              status: "running",
-              bell: false,
-              exitCode: null,
-              ...(pane.teamLaunch ? { teamLaunch: true } : {}),
-            };
-          }
-          // Refs first, as closeTerminal does: a save racing this one must see the new tabs.
-          const next = { ...terminalsRef.current, ...added };
-          terminalsRef.current = next;
-          const tabs = Object.values(next)
-            .filter((t) => t.projectSlug === projectSlug)
-            .map((t) => tabFromTerminal(t, projectBaseCwd(project)));
-          const updated: ProjectConfig = { ...project, tabs };
-          setTerminals((prev) => ({ ...prev, ...added }));
-          setAllProjects((ps) => ps.map((p) => (p.slug === projectSlug ? updated : p)));
-          setProjects((ps) => ps.map((p) => (p.slug === projectSlug ? updated : p)));
-          try {
-            await window.aya.updateProject(updated);
-          } catch (err) {
-            // An unsaved tab would stay on screen with a running agent that main never assigns.
-            const kept = { ...terminalsRef.current };
-            for (const id of Object.keys(added)) delete kept[id];
-            terminalsRef.current = kept;
-            setTerminals((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !(id in added))));
-            setAllProjects((ps) => ps.map((p) => (p.slug === projectSlug ? project : p)));
-            setProjects((ps) => ps.map((p) => (p.slug === projectSlug ? project : p)));
-            for (const id of Object.keys(added)) void window.aya.ptyKill(id);
-            throw err;
-          }
-          for (const pane of panes) {
-            appendProjectEvent({ projectSlug, terminalId: pane.id, level: "active", title: `${pane.name} started` });
-          }
-        };
-        void open().then(
-          () => window.aya.teamPanesOpened(requestId, null),
-          (err: unknown) => window.aya.teamPanesOpened(requestId, err instanceof Error ? err.message : String(err)),
-        );
-      }),
-    [appendProjectEvent, effectiveCwd],
-  );
-
-  const closeTerminal = useCallback(
-    (id: string) => {
-      const t = terminalsRef.current[id];
-      if (!t) return;
-    // A closed tab plays no team role; a restart keeps it (same tab).
-    void window.aya.teamReleasePane(t.projectSlug, id).catch(() => {});
-    // Drop the confirmed-session marker so the id doesn't linger (and can't be
-    // mistaken for a re-mount if the id were ever reused).
-    forgetSpawn(id);
-    // Drop the restart-trigger counter too - entries are tiny, but a
-    // long-lived session cycling many tabs would otherwise retain one per
-    // closed id forever (#94).
-    setRestartTriggers((prev) => {
-      if (!(id in prev)) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-    void window.aya.ptyKill(id);
-    appendProjectEvent({
-      projectSlug: t.projectSlug,
-      terminalId: t.id,
-      level: "info",
-      title: `${t.name} closed`,
-    });
-    // Advance the refs now instead of waiting for the re-render. Closes can
-    // arrive back-to-back - two quick Cmd+W, a script driving the control
-    // socket - and the next one resolves "the active tab" through these refs.
-    // While they still named the tab we just closed, that second close looked
-    // up a terminal that was already gone and silently did nothing.
-    const nextTerminals = { ...terminalsRef.current };
-    delete nextTerminals[id];
-    terminalsRef.current = nextTerminals;
-    if (activeTabByProjectRef.current[t.projectSlug] === id) {
-      const remaining = Object.values(nextTerminals).filter(
-        (x) => x.projectSlug === t.projectSlug,
-      );
-      const nextActive =
-        remaining.length > 0 ? remaining[remaining.length - 1].id : null;
-      activeTabByProjectRef.current = {
-        ...activeTabByProjectRef.current,
-        [t.projectSlug]: nextActive,
-      };
-      if (nextActive && activeProjectIdRef.current === t.projectSlug) {
-        setCloseFocusHold({ slug: t.projectSlug, terminalId: nextActive });
-      }
-      setActiveTabByProject((p) =>
-        p[t.projectSlug] === id ? { ...p, [t.projectSlug]: nextActive } : p,
-      );
-    }
-    setTerminals((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        persistProject(t.projectSlug, next);
-        return next;
-      });
-    },
-    [appendProjectEvent, persistProject],
-  );
-
-  // Drop a terminal's agent status overlay once the user attends to it (#34,
-  // Part 1). The overlay is an attention signal for terminals you are NOT
-  // looking at, so the act of focusing the terminal IS the acknowledgement -
-  // there is deliberately no separate "dismiss" control. Same
-  // fall-back-to-PTY-truth as the control-socket `clear`; a real exit/spawn
-  // error has no overlay and stays untouched. Returns `prev` when there is
-  // nothing to clear so React can skip the re-render. The project-tab badge is
-  // a pure aggregate over its terminals, so it keeps glowing until the last
-  // flagged terminal is visited - no separate project-level clear needed.
-  const clearTerminalStatus = useCallback((id: string) => {
-    setTerminals((prev) => {
-      const t = prev[id];
-      if (!t || !t.externalStatus) return prev;
-      return { ...prev, [id]: clearedTerminalStatus(t) };
-    });
-  }, []);
-
-  // Switching to a terminal (sidebar click, keyboard tab-switch, split-pane
-  // focus) acknowledges its overlay. Keyed on the active-tab map, so it fires
-  // on the transition TO a terminal; clearTerminalStatus no-ops when there is
-  // no overlay. Does not depend on `terminals`, so clearing can't re-trigger it.
-  useEffect(() => {
-    const id = activeProjectId ? activeTabByProject[activeProjectId] : null;
-    if (id) clearTerminalStatus(id);
-  }, [activeProjectId, activeTabByProject, clearTerminalStatus]);
-
-  // Restart the detached PTY host (#28). This necessarily kills every running
-  // terminal process - their PTYs are children of the host - so we mark all
-  // terminals as exited rather than auto-respawning (maintainer decision:
-  // leave tabs stopped; the user restarts each with Shift+Enter). Used by both
-  // the stale-host banner and the Settings action.
-  const restartPtyHost = useCallback(async (): Promise<string | null> => {
-    try {
-      await window.aya.restartPtyHost();
-    } catch (err) {
-      // Restart failed or did not finish (the old host still runs, or the user cancelled). The panes are left as
-      // they are, the red dot on Restart Aya stays, and Settings shows why.
-      const reason = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : String(err);
-      // Saying no to the confirmation is not a failure to report.
-      return reason === "restart cancelled" ? null : reason;
-    }
-    setTerminals((prev) => {
-      const next: typeof prev = {};
-      for (const [id, t] of Object.entries(prev)) {
-        // `stopped` (not a fake exitCode 0) marks the PTY as killed-by-restart:
-        // shows idle + restartable via Shift+Enter, without masquerading as a
-        // clean "done" finish in the project badges or event log.
-        next[id] = { ...t, status: "idle", stopped: true, bell: false };
-      }
-      return next;
-    });
-    return null;
-  }, []);
-
-  const renameTerminal = useCallback(
-    (id: string, name: string) => {
-      setTerminals((prev) => {
-        const t = prev[id];
-        if (!t) return prev;
-        const next = { ...prev, [id]: { ...t, name } };
-        persistProject(t.projectSlug, next);
-        return next;
-      });
-    },
-    [persistProject],
-  );
-
-  const assignTerminalToActiveSplitCell = useCallback((id: string) => {
-    const terminal = terminalsRef.current[id];
-    if (!terminal) return;
-    setActiveTabByProject((prev) => ({ ...prev, [terminal.projectSlug]: id }));
-    updateProjectSplitTree(terminal.projectSlug, (tree, activeLeafId) => ({
-      tree: assignTerminal(tree, activeLeafId, id),
-    }));
-  }, [updateProjectSplitTree]);
-
-  const assignTerminalToSplitCell = useCallback(
-    (id: string, leafId: string) => {
-      const terminal = terminalsRef.current[id];
-      if (!terminal) return;
-      setSingleViewByProject((prev) => ({ ...prev, [terminal.projectSlug]: null }));
-      setActiveTabByProject((prev) => ({ ...prev, [terminal.projectSlug]: id }));
-      updateProjectSplitTree(terminal.projectSlug, (tree) => ({
-        tree: assignTerminal(tree, leafId, id),
-        activeLeafId: leafId,
-      }));
-    },
-    [updateProjectSplitTree],
-  );
-
-  const collapseToSingleTerminal = useCallback((terminal: TerminalState) => {
-    setActiveTabByProject((prev) => ({ ...prev, [terminal.projectSlug]: terminal.id }));
-    setSingleViewByProject((prev) => ({
-      ...prev,
-      [terminal.projectSlug]: terminal.id,
-    }));
-    setTerminals((prev) => {
-      const cur = prev[terminal.id];
-      if (!cur || !cur.bell) return prev;
-      return { ...prev, [terminal.id]: { ...cur, bell: false } };
-    });
-  }, []);
+  const {
+    launchTerminal,
+    closeTerminal,
+    restartPtyHost,
+    renameTerminal,
+    restartTerminal,
+    restartTriggers,
+    forceRestartTerminal,
+    openShellTab,
+    openMachineTerminal,
+  } = useTerminalActions({
+    projectFallbacks,
+    activeProjectId,
+    activeTabByProject,
+    activeLeafByProject,
+    activeProjectIdRef,
+    activeTabByProjectRef,
+    projectsRef,
+    terminalsRef,
+    presetsRef,
+    remotePresetsByProjectRef,
+    splitEnabledRef,
+    lastActivityRef,
+    setTerminals,
+    setAllProjects,
+    setProjects,
+    setActiveTabByProject,
+    setSingleViewByProject,
+    setCloseFocusHold,
+    appendProjectEvent,
+    persistProject,
+  });
 
   const selectTerminalFromSidebar = useCallback(
     (id: string) => {
@@ -1427,479 +596,43 @@ export function App() {
     [activeTabByProject, collapseToSingleTerminal, updateProjectSplitTree],
   );
 
-  const addTerminalSplit = useCallback(
-    (id: string, direction: "right" | "below") => {
-      const terminal = terminalsRef.current[id];
-      if (!terminal) return;
-      setSingleViewByProject((prev) => ({ ...prev, [terminal.projectSlug]: null }));
-      setActiveTabByProject((prev) => ({ ...prev, [terminal.projectSlug]: id }));
-      // The whole grid-shuffling dance this replaced existed only because a
-      // split had to insert a full row/column. A tree divides just this pane.
-      updateProjectSplitTree(terminal.projectSlug, (tree, activeLeafId) => {
-        const newLeafId = uuid();
-        const withPane = assignTerminal(tree, activeLeafId, id);
-        return {
-          tree: splitLeaf(
-            withPane,
-            activeLeafId,
-            direction === "right" ? "row" : "column",
-            uuid(),
-            newLeafId,
-          ),
-          activeLeafId: newLeafId,
-        };
-      });
-    },
-    [updateProjectSplitTree],
-  );
-
-  const removeTerminalFromSplit = useCallback(
-    (id: string) => {
-      const terminal = terminalsRef.current[id];
-      if (!terminal) return;
-      updateProjectSplitTree(terminal.projectSlug, (tree) => ({
-        tree: removeTerminal(tree, id),
-      }));
-    },
-    [updateProjectSplitTree],
-  );
-
-  /** Focus a pane by id (mouse click on a pane, or filling an empty one).
-   *  Keeping the active terminal in sync is what makes the sidebar highlight
-   *  and the clear-on-focus effect follow a click, not just keyboard nav. */
-  const setActiveSplitCell = useCallback(
-    (slug: string, leafId: string) => {
-      // Before the split guard: a click on the pane is the pick that ends a hold in any layout.
-      setCloseFocusHold(null);
-      if (!splitEnabledRef.current) return;
-      setSingleViewByProject((prev) => ({ ...prev, [slug]: null }));
-      updateProjectSplitTree(slug, (tree) => ({ tree, activeLeafId: leafId }));
-    },
-    [updateProjectSplitTree],
-  );
-
-  const resizeSplit = useCallback(
-    (slug: string, splitId: string, ratio: number) => {
-      updateProjectSplitTree(slug, (tree, activeLeafId) => ({
-        tree: resizeSplitNode(tree, splitId, ratio),
-        activeLeafId,
-      }));
-    },
-    [updateProjectSplitTree],
-  );
-
-  /** Directional pane navigation. Geometric rather than grid arithmetic: with
-   *  a tree the panes no longer line up in rows and columns, so "the pane to
-   *  the right" is whichever rectangle actually sits there. */
-  const focusSplitPane = useCallback(
-    (direction: "left" | "right" | "up" | "down") => {
-      if (!splitEnabledRef.current) return;
-      if (!activeProjectId) return;
-      const project = projectsRef.current.find((p) => p.slug === activeProjectId);
-      if (!project) return;
-      const existing = projectSplitTree(project);
-      if (!existing) return;
-      const fallbackId = activeTabByProject[project.slug] ?? project.tabs[0]?.id ?? null;
-      const tree = normalizeTreeForTabs(
-        existing,
-        new Set(project.tabs.map((tab) => tab.id)),
-        fallbackId,
-        uuid(),
-      );
-      const from = resolveActiveLeafId(
-        tree,
-        activeLeafByProject[project.slug],
-        fallbackId,
-      );
-      const target = focusDirection(tree, from, direction);
-      if (!target) return; // at the edge — a no-op, never a wrap-around
-      setSingleViewByProject((prev) => ({ ...prev, [project.slug]: null }));
-      updateProjectSplitTree(project.slug, (current) => ({
-        tree: current,
-        activeLeafId: target,
-      }));
-    },
-    [activeProjectId, activeTabByProject, activeLeafByProject, updateProjectSplitTree],
-  );
-
-  const splitActivePane = useCallback(
-    (direction: "right" | "below") => {
-      if (!splitEnabledRef.current) return;
-      if (!activeProjectId) return;
-      const project = projectsRef.current.find((p) => p.slug === activeProjectId);
-      if (!project) return;
-      const fallbackId = activeTabByProject[project.slug] ?? project.tabs[0]?.id ?? null;
-      const tree = normalizeTreeForTabs(
-        projectSplitTree(project),
-        new Set(project.tabs.map((tab) => tab.id)),
-        fallbackId,
-        uuid(),
-      );
-      const activeLeafId = resolveActiveLeafId(
-        tree,
-        activeLeafByProject[project.slug],
-        fallbackId,
-      );
-      const terminalId =
-        singleViewByProject[project.slug] ??
-        leaves(tree).find((l) => l.id === activeLeafId)?.terminalId ??
-        fallbackId;
-      if (terminalId) addTerminalSplit(terminalId, direction);
-    },
-    [
-      activeProjectId,
-      activeTabByProject,
-      activeLeafByProject,
-      addTerminalSplit,
-      singleViewByProject,
-    ],
-  );
-
-  /** Reorder project tabs. Persists the new slug order to disk so a
-   *  restart preserves the user's choice. */
-  const reorderProjects = useCallback(async (orderedSlugs: string[]) => {
-    const nextOrder = dedupeSlugs([
-      ...orderedSlugs,
-      ...projectStateRef.current.order.filter(
-        (slug) => !orderedSlugs.includes(slug),
-      ),
-    ]);
-    setProjects((prev) => {
-      const bySlug = new Map(prev.map((p) => [p.slug, p]));
-      const out: ProjectConfig[] = [];
-      // Reordered ones first in their new order
-      for (const slug of orderedSlugs) {
-        const p = bySlug.get(slug);
-        if (p) out.push(p);
-      }
-      // Then anything not mentioned (shouldn't happen normally) goes after
-      for (const p of prev) {
-        if (!orderedSlugs.includes(p.slug)) out.push(p);
-      }
-      return out;
-    });
-    updateProjectCollection({
-      ...projectStateRef.current,
-      order: nextOrder,
-    });
-  }, [updateProjectCollection]);
-
-  /** Reorder a project's terminal tabs. Walks the terminals map and
-   *  rebuilds it with the new key order — `project.tabs` is derived from
-   *  this map's filter+map so persistence comes along for free. */
-  const reorderTerminalsInProject = useCallback(
-    (slug: string, orderedIds: string[]) => {
-      setTerminals((prev) => {
-        const next: Record<string, TerminalState> = {};
-        for (const id of orderedIds) {
-          const t = prev[id];
-          if (t && t.projectSlug === slug) next[id] = t;
-        }
-        for (const [id, t] of Object.entries(prev)) {
-          if (!(id in next)) next[id] = t;
-        }
-        persistProject(slug, next);
-        return next;
-      });
-    },
-    [persistProject],
-  );
-
-  /** Rename a project — updates the JSON's `name` field. The slug (file
-   *  identity) stays the same so existing references aren't broken. */
-  const renameProject = useCallback(
-    async (slug: string, newName: string) => {
-      const trimmed = newName.trim();
-      if (!trimmed) return;
-      const project = projectsRef.current.find((p) => p.slug === slug);
-      if (!project || project.name === trimmed) return;
-      const updated = { ...project, name: trimmed };
-      setAllProjects((prev) =>
-        prev.map((p) => (p.slug === slug ? updated : p)),
-      );
-      setProjects((prev) =>
-        prev.map((p) => (p.slug === slug ? updated : p)),
-      );
-      try {
-        await window.aya.updateProject(updated);
-      } catch (err) {
-        console.error("renameProject failed:", err);
-      }
-    },
-    [],
-  );
-
-  /** Close the project tab without deleting its JSON config. Closed projects
-   *  stay available from search / recent projects but do not auto-reopen. */
-  const closeProject = useCallback(async (slug: string) => {
-    const owned = Object.values(terminalsRef.current).filter(
-      (t) => t.projectSlug === slug,
-    );
-    for (const t of owned) {
-      void window.aya.ptyKill(t.id);
-    }
-    setTerminals((prev) => {
-      const next = { ...prev };
-      for (const t of owned) delete next[t.id];
-      return next;
-    });
-      setActiveTabByProject((prev) => {
-        const next = { ...prev };
-        delete next[slug];
-        return next;
-      });
-    setSingleViewByProject((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-    setWarmProjectSlugs((prev) => prev.filter((s) => s !== slug));
-    const remaining = projectsRef.current.filter((p) => p.slug !== slug);
-    setProjects(remaining);
-    updateProjectCollection({
-      ...projectStateRef.current,
-      open: remaining.map((p) => p.slug),
-      recent: dedupeSlugs([slug, ...projectStateRef.current.recent]),
-    });
-    setActiveProjectId((cur) => {
-      if (cur !== slug) return cur;
-      return remaining[0]?.slug ?? null;
-    });
-    setGit((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-    setProjectFallbacks((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-  }, [updateProjectCollection, setGit]);
-
-  /** Hand a project to another window: drop ALL local state for it WITHOUT
-   *  killing its PTYs (they live in the detached host; the adopting window
-   *  re-attaches like after an app restart) and WITHOUT touching recent (the
-   *  project stays open - just elsewhere). Mirrors closeProject minus the
-   *  ptyKill loop and the recent bump. */
-  const releaseProject = useCallback((slug: string) => {
-    const owned = Object.values(terminalsRef.current).filter(
-      (t) => t.projectSlug === slug,
-    );
-    setTerminals((prev) => {
-      const next = { ...prev };
-      for (const t of owned) delete next[t.id];
-      return next;
-    });
-    setActiveTabByProject((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-    setSingleViewByProject((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-    setWarmProjectSlugs((prev) => prev.filter((s) => s !== slug));
-    const remaining = projectsRef.current.filter((p) => p.slug !== slug);
-    setProjects(remaining);
-    updateProjectCollection({
-      ...projectStateRef.current,
-      open: remaining.map((p) => p.slug),
-    });
-    setActiveProjectId((cur) => {
-      if (cur !== slug) return cur;
-      return remaining[0]?.slug ?? null;
-    });
-    setGit((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-    setProjectFallbacks((prev) => {
-      const next = { ...prev };
-      delete next[slug];
-      return next;
-    });
-  }, [updateProjectCollection, setGit]);
-
-  /** Move a project (its tab + running terminals) to another Aya window, or
-   *  tear it out into a new one. Local projects only for now - a remote
-   *  project's directory lives on the remote host, so the adopt-by-directory
-   *  flow can't resolve it there. */
-  const moveProjectToWindow = useCallback(
-    (slug: string, target: number | "new", at?: { x: number; y: number }) => {
-      const project = projectsRef.current.find((p) => p.slug === slug);
-      if (!project || project.remote) return;
-      // Chrome semantics: a window that loses its last tab closes itself.
-      // Without this the emptied window lingers (often hidden behind another)
-      // and keeps showing up as a phantom "Move to window…" target.
-      const emptiesThisWindow =
-        projectsRef.current.filter((p) => p.slug !== slug).length === 0;
-      releaseProject(slug);
-      void window.aya
-        .adoptProjectInWindow(project.directory, target, at)
-        .then(() => {
-          if (emptiesThisWindow) void window.aya.closeWindow();
-        });
-    },
-    [releaseProject],
-  );
-
-  const openKnownProject = useCallback(
-    async (project: ProjectConfig) => {
-      const alreadyOpen = projectsRef.current.find(
-        (p) => p.slug === project.slug,
-      );
-      if (alreadyOpen) {
-        setActiveProjectId(alreadyOpen.slug);
-        return;
-      }
-      const nextProjects = [...projectsRef.current, project];
-      setProjects(nextProjects);
-      setActiveProjectId(project.slug);
-      updateProjectCollection({
-        ...projectStateRef.current,
-        order: dedupeSlugs([...projectStateRef.current.order, project.slug]),
-        open: nextProjects.map((p) => p.slug),
-        recent: dedupeSlugs([project.slug, ...projectStateRef.current.recent]),
-      });
-
-      if (project.remote) {
-        // No git entry for remotes: activeGitDirectory is null for them, so the
-        // status bar has nothing to look up and renders no git strip.
-        hydrateProjectTerminals(project, project.remote.directory);
-        void window.aya
-          .listRemotePresets(project.remote.sshTarget)
-          .then((remotePresets) => {
-            setRemotePresetsByProject((prev) => ({
-              ...prev,
-              [project.slug]: remotePresets,
-            }));
-          })
-          .catch(() => undefined);
-        return;
-      }
-      const exists = await window.aya.dirExists(project.directory);
-      if (exists) {
-        hydrateProjectTerminals(project, project.directory);
-        void window.aya.getGitInfo(project.directory).then((info) => {
-          setGit((g) => mergeGitInfo(g, project.directory, info));
-        });
-      } else {
-        setMissingDirQueue((prev) => [
-          ...prev,
-          {
-            slug: project.slug,
-            name: project.name,
-            directory: project.directory,
-          },
-        ]);
-      }
-    },
-    [hydrateProjectTerminals, updateProjectCollection, setGit],
-  );
-
-  const onCreateProject = useCallback(
-    async (name: string, directory: string) => {
-      try {
-        const project = await window.aya.createProject(name, directory);
-        const fallbackPreset = presetsRef.current[0] ?? BUILTIN_SHELL;
-        const shellTab: WorkingTab = {
-          id: uuid(),
-          presetId: fallbackPreset.id,
-          name: defaultTabName(fallbackPreset),
-        };
-        const withTabs: ProjectConfig = { ...project, tabs: [shellTab] };
-        void window.aya.updateProject(withTabs);
-        setAllProjects((prev) => [...prev, withTabs]);
-        const nextProjects = [...projectsRef.current, withTabs];
-        setProjects(nextProjects);
-        updateProjectCollection({
-          ...projectStateRef.current,
-          order: dedupeSlugs([...projectStateRef.current.order, withTabs.slug]),
-          open: nextProjects.map((p) => p.slug),
-          recent: dedupeSlugs([withTabs.slug, ...projectStateRef.current.recent]),
-        });
-        setTerminals((prev) => ({
-          ...prev,
-          [shellTab.id]: {
-            id: shellTab.id,
-            projectSlug: withTabs.slug,
-            presetId: shellTab.presetId,
-            name: shellTab.name,
-            cwd: withTabs.directory,
-            status: "running",
-            bell: false,
-            exitCode: null,
-          },
-        }));
-        setActiveTabByProject((prev) => ({
-          ...prev,
-          [withTabs.slug]: shellTab.id,
-        }));
-        setActiveProjectId(withTabs.slug);
-        void window.aya.getGitInfo(withTabs.directory).then((info) =>
-          setGit((g) => mergeGitInfo(g, withTabs.directory, info)),
-        );
-        setNewProjectModal(null);
-      } catch (err) {
-        console.error(err);
-        alert(err instanceof Error ? err.message : String(err));
-      }
-    },
-    [updateProjectCollection, setGit],
-  );
-
-  const onCreateRemoteProject = useCallback(
-    async (result: RemoteProjectCreateResult, sshTarget: string) => {
-      try {
-        const remoteProject = result.project;
-        const localProject = await window.aya.createRemoteProject({
-          name: remoteProject.name,
-          directory: remoteProject.directory,
-          hostId: result.host.id,
-          label: result.host.name || result.host.id,
-          sshTarget,
-        });
-        // Replace any existing entry with the same slug rather than append:
-        // createRemoteProject is idempotent now (re-opening an existing remote
-        // project returns it), so a blind push would duplicate it.
-        setAllProjects((prev) => [
-          ...prev.filter((p) => p.slug !== localProject.slug),
-          localProject,
-        ]);
-        const nextProjects = [
-          ...projectsRef.current.filter((p) => p.slug !== localProject.slug),
-          localProject,
-        ];
-        setProjects(nextProjects);
-        updateProjectCollection({
-          ...projectStateRef.current,
-          order: dedupeSlugs([
-            ...projectStateRef.current.order,
-            localProject.slug,
-          ]),
-          open: nextProjects.map((p) => p.slug),
-          recent: dedupeSlugs([
-            localProject.slug,
-            ...projectStateRef.current.recent,
-          ]),
-        });
-        setRemotePresetsByProject((prev) => ({
-          ...prev,
-          [localProject.slug]: result.presets,
-        }));
-        setActiveProjectId(localProject.slug);
-        setNewProjectModal(null);
-      } catch (err) {
-        console.error(err);
-        alert(err instanceof Error ? err.message : String(err));
-      }
-    },
-    [updateProjectCollection],
-  );
+  const {
+    reorderProjects,
+    reorderTerminalsInProject,
+    renameProject,
+    closeProject,
+    moveProjectToWindow,
+    openKnownProject,
+    onCreateRemoteProject,
+    handleCreateMissingDir,
+    handleUseHomeForMissingDir,
+    showNewProjectModal,
+    submitProjectFromModal,
+    openProject,
+  } = useProjectActions({
+    projectsRef,
+    allProjectsRef,
+    projectStateRef,
+    terminalsRef,
+    presetsRef,
+    setProjects,
+    setAllProjects,
+    setTerminals,
+    setActiveProjectId,
+    setActiveTabByProject,
+    setSingleViewByProject,
+    setWarmProjectSlugs,
+    setGit,
+    setProjectFallbacks,
+    setRemotePresetsByProject,
+    setNewProjectModal,
+    missingDirQueue,
+    setMissingDirQueue,
+    homeDir,
+    updateProjectCollection,
+    persistProject,
+    hydrateProjectTerminals,
+  });
 
   const onSavePresets = useCallback(async (next: Preset[]) => {
     await window.aya.savePresets(next);
@@ -1913,24 +646,8 @@ export function App() {
     setSnippets(await window.aya.listSnippets());
   }, []);
 
-  // Most preferences now persist through usePersistentPreference's setter
-  // directly; only ones with extra side effects keep a wrapper.
-  const updateTerminalFontFamily = useCallback((next: string) => {
-    setTerminalFontFamily(next);
-    if (next.trim()) {
-      localStorage.setItem(TERMINAL_FONT_FAMILY_STORAGE_KEY, next);
-    } else {
-      localStorage.removeItem(TERMINAL_FONT_FAMILY_STORAGE_KEY);
-    }
-  }, []);
-
-  const updateShowGitHubLink = useCallback(
-    (next: boolean) => {
-      setShowGitHubLink(next);
-      if (!next) setGithubLinks({}); // drop resolved links once the chip is off
-    },
-    [setShowGitHubLink, setGithubLinks],
-  );
+  const { updateTerminalFontFamily, updateShowGitHubLink } =
+    useAppPreferenceActions({ setTerminalFontFamily, setShowGitHubLink, setGithubLinks });
 
   const { skinThemeColors, onSaveThemes, onImportTheme, activeThemeColors } =
     useAppTheme({
@@ -1942,164 +659,6 @@ export function App() {
       presetsRef,
       setPresets,
     });
-
-  /** Called by TerminalView when the user presses Shift+Enter in a
-   *  cleanly-exited terminal. Clears the exit state so the PTY event router
-   *  can resume updating status when the new PTY emits data. */
-  const restartTerminal = useCallback((id: string) => {
-    const terminal = terminalsRef.current[id];
-    // Continuity across in-session respawns: if this tab already ran a session
-    // (confirmed live output - wasSpawned, #67), the respawn must carry the
-    // agent resume arg exactly like a boot-restored tab, or a launcher-opened
-    // claude/codex tab comes back as a brand-new EMPTY session and the
-    // conversation is lost. Flipping `restored` is the one gate
-    // terminalCommand already reads. A deliberately fresh session = close the
-    // tab and open a new one from the launcher.
-    //
-    // spawnFailure veto: the host paints the failure banner as a synthetic
-    // `data` event (pty.ts reportSpawnFailure) which can mark wasSpawned
-    // before the spawn-failed state lands in the ref the router guards on -
-    // and a tab whose spawn FAILED has no session to resume. Without the
-    // veto, the banner's Restart would append --continue and resume an
-    // unrelated conversation from the same cwd. A tab that had a REAL
-    // session before a failed respawn keeps continuity through the sticky
-    // `restored` flag flipped by that earlier restart.
-    const hadSession = wasSpawned(id) && !terminal?.spawnFailure;
-    // Same marker hygiene as forceRestartTerminal (after hadSession is read):
-    // an explicit restart means the NEXT mount of this id must plain-spawn.
-    // Leaving the no-session marker set would let a remount that races the
-    // trigger spawn attach-probe again and re-stick `stopped` onto a live
-    // process; the host's in-flight/ptys guards make a double plain spawn
-    // safe, so forgetting is the strictly better side of that race. The
-    // unconditional forget also subsumes the #87 veto fix: a poisoned
-    // wasSpawned marker from a failed spawn's banner is dropped here too,
-    // so it can never latch `restored` on a later restart.
-    forgetSpawn(id);
-    setTerminals((prev) => {
-      const t = prev[id];
-      if (!t) return prev;
-      return {
-        ...prev,
-        [id]: {
-          ...t,
-          exitCode: null,
-          status: "running",
-          bell: false,
-          spawnFailure: undefined,
-          stopped: undefined,
-          restored: t.restored || hadSession,
-        },
-      };
-    });
-    // Spawn via the restartTrigger effect in TerminalView - it fires AFTER
-    // this state batch re-renders, so the command it reads already carries the
-    // resume arg from the restored flip above. Spawning directly in the
-    // caller (the old way) raced the re-render and lost the -c.
-    setRestartTriggers((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
-    // Also clear the activity timestamp so the dot doesn't claim "recently
-    // active" until the new PTY actually writes something.
-    delete lastActivityRef.current[id];
-    if (terminal) {
-      appendProjectEvent({
-        projectSlug: terminal.projectSlug,
-        terminalId: terminal.id,
-        level: "active",
-        title: `${terminal.name} restarted`,
-      });
-    }
-  }, [appendProjectEvent, lastActivityRef]);
-
-  // Per-terminal counter — bumped each time we forcibly restart (right-click
-  // → Restart). TerminalView watches the prop and triggers a fresh ptySpawn
-  // on change, reusing the existing xterm instance + scrollback.
-  const [restartTriggers, setRestartTriggers] = useState<Record<string, number>>(
-    {},
-  );
-
-  /** Right-click → "Restart" handler. Kills the PTY if it can still be
-   *  alive (see the maybeAlive gate) and asks TerminalView to spawn a
-   *  fresh one. */
-  const forceRestartTerminal = useCallback(async (id: string) => {
-    const t = terminalsRef.current[id];
-    if (!t) return;
-    // Read the had-a-session marker BEFORE the kill and forgetSpawn below wipe
-    // it - the respawned agent tab must resume its conversation (see
-    // restartTerminal for the rationale, including the spawnFailure veto).
-    const hadSession = wasSpawned(id) && !t.spawnFailure;
-    // Kill only a possibly-live PTY. For an already-dead tab (exited - which
-    // includes spawn failures, they emit a synthetic exit - or stopped by a
-    // host restart) the host map has no entry, so killPty would arm its
-    // pending-kill marker (the closed-tab race guard) and that marker would
-    // swallow the respawn the trigger below requests - a silent "Restart did
-    // nothing" for up to the marker's TTL. A death the renderer has not seen
-    // yet (exit event still in flight) can still hit that window; the gate
-    // covers every state the user can actually observe when clicking.
-    const maybeAlive = t.exitCode === null && !t.stopped;
-    // A live pane's background tasks and monitors stop with it: asked first when its screen shows some.
-    if (maybeAlive && !(await window.aya.confirmPaneRestart(id).catch(() => true))) return;
-    if (maybeAlive) {
-      // Await the kill so the main-side ptys map is empty by the time the
-      // new spawn IPC arrives — otherwise spawnPty treats it as a re-mount
-      // and replays the old buffer instead of starting fresh.
-      try {
-        await window.aya.ptyKill(id);
-      } catch {
-        /* ignore — best effort */
-      }
-    }
-    // Forget the confirmed-session marker AFTER the kill: a still-alive process
-    // can emit output between the request and the kill landing, which would
-    // re-mark the id; clearing it last (once the PTY is dead, no more output)
-    // ensures an UNMOUNTED tab's next mount spawns fresh instead of attaching-
-    // only to a killed PTY (which would no-session it and stick it as stopped).
-    forgetSpawn(id);
-    setTerminals((prev) => {
-      const cur = prev[id];
-      if (!cur) return prev;
-      return {
-        ...prev,
-        [id]: {
-          ...cur,
-          exitCode: null,
-          status: "running",
-          bell: false,
-          spawnFailure: undefined,
-          stopped: undefined,
-          restored: cur.restored || hadSession,
-        },
-      };
-    });
-    delete lastActivityRef.current[id];
-    appendProjectEvent({
-      projectSlug: t.projectSlug,
-      terminalId: t.id,
-      level: "active",
-      title: `${t.name} restarted`,
-    });
-    setRestartTriggers((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
-  }, [appendProjectEvent, lastActivityRef]);
-
-  /** Open a shell terminal in the active project. Used by Cmd/Ctrl+T. Falls
-   *  back to BUILTIN_SHELL if the user has deleted their shell preset so the
-   *  shortcut always works. */
-  const openShellTab = useCallback(() => {
-    const slug = activeProjectIdRef.current;
-    if (!slug) return;
-    const project = projectsRef.current.find((p) => p.slug === slug);
-    const sourcePresets =
-      project?.remote
-        ? (remotePresetsByProjectRef.current[slug] ?? presetsRef.current)
-        : presetsRef.current;
-    const shellPreset =
-      sourcePresets.find((p) => p.id === PRESET_ID_SHELL) ?? sourcePresets[0] ?? BUILTIN_SHELL;
-    launchTerminal(shellPreset);
-  }, [launchTerminal]);
-
-  /** A tab on one of the user's machines, from the machines popover: `ssh -- <target>` in the active project. */
-  const openMachineTerminal = useCallback(
-    (sshTarget: string) => launchTerminal(getPreset(presetsRef.current, PRESET_ID_SHELL), undefined, sshTarget),
-    [launchTerminal],
-  );
 
   /** Cycle through the active project's terminal tabs in display order. */
   const cycleActiveProjectTab = useCallback((delta: number) => {
@@ -2120,35 +679,6 @@ export function App() {
     // view it collapses to show the cycled-to terminal, as before.
     selectTerminalFromSidebar(tabs[next].id);
   }, [activeTabByProject, selectTerminalFromSidebar]);
-
-  const dequeueMissingDir = useCallback(() => {
-    setMissingDirQueue((q) => q.slice(1));
-  }, []);
-
-  const handleCreateMissingDir = useCallback(async () => {
-    const entry = missingDirQueue[0];
-    if (!entry) return;
-    await window.aya.createDir(entry.directory);
-    const project = projectsRef.current.find((p) => p.slug === entry.slug);
-    if (project) {
-      hydrateProjectTerminals(project, project.directory);
-      void window.aya.getGitInfo(project.directory).then((info) => {
-        setGit((g) => mergeGitInfo(g, project.directory, info));
-      });
-    }
-    dequeueMissingDir();
-  }, [missingDirQueue, hydrateProjectTerminals, dequeueMissingDir, setGit]);
-
-  const handleUseHomeForMissingDir = useCallback(() => {
-    const entry = missingDirQueue[0];
-    if (!entry) return;
-    setProjectFallbacks((prev) => ({ ...prev, [entry.slug]: homeDir }));
-    const project = projectsRef.current.find((p) => p.slug === entry.slug);
-    if (project) {
-      hydrateProjectTerminals(project, homeDir);
-    }
-    dequeueMissingDir();
-  }, [missingDirQueue, homeDir, hydrateProjectTerminals, dequeueMissingDir]);
 
   const activeProject = activeProjectId
     ? findProject(projects, activeProjectId)
@@ -2230,92 +760,25 @@ export function App() {
     activeBranch,
     setGithubLinks,
   });
-  // Split panes are not supported in the experimental "projects-left" layout
-  // (terminals live in a top tab strip there). Ignore any saved split so the
-  // body shows a single terminal, and disable the split actions. The project's
-  // stored splitLayout is left untouched, so switching back to the classic
-  // layout restores it. (splitEnabled is defined up near the refs above.)
-  const savedSplitTree = useMemo(
-    () =>
-      splitEnabled && activeProject && activeProjectId
-        ? normalizeTreeForTabs(
-            projectSplitTree(activeProject),
-            new Set(activeProject.tabs.map((tab) => tab.id)),
-            activeTabId,
-            uuid(),
-          )
-        : null,
-    [splitEnabled, activeProject, activeProjectId, activeTabId],
-  );
-  const hasStoredSplit =
-    !!activeProject && !!projectSplitTree(activeProject) && splitEnabled;
-  const singleViewTerminalId =
-    activeProjectId && singleViewByProject[activeProjectId] && terminals[singleViewByProject[activeProjectId]!]
-      ? singleViewByProject[activeProjectId]
-      : null;
-  /** The tree actually rendered: a single-terminal view collapses to one pane,
-   *  and a project with no stored split still renders through the same path so
-   *  panes and the unsplit view share one code path. */
-  const splitTree = useMemo(() => {
-    if (savedSplitTree && singleViewTerminalId) {
-      return leaf(SINGLE_VIEW_LEAF_ID, singleViewTerminalId);
-    }
-    if (savedSplitTree) return savedSplitTree;
-    return activeTabId ? leaf(SINGLE_VIEW_LEAF_ID, activeTabId) : null;
-  }, [savedSplitTree, singleViewTerminalId, activeTabId]);
-  const isSplit =
-    !!splitTree && !singleViewTerminalId && hasStoredSplit && leafCount(splitTree) > 1;
-  const paneRects = useMemo(
-    () => (splitTree ? layoutRects(splitTree) : []),
-    [splitTree],
-  );
-  const paneDividers = useMemo(
-    () => (isSplit && splitTree ? dividerRects(splitTree) : []),
-    [isSplit, splitTree],
-  );
-  /** Pane number per terminal, for the sidebar chip. Positional, so it tracks
-   *  what the user sees rather than tree structure. */
-  const splitAssignments: Record<string, number> = useMemo(() => {
-    const out: Record<string, number> = {};
-    if (!hasStoredSplit) return out;
-    paneRects.forEach((pane, index) => {
-      if (pane.terminalId) out[pane.terminalId] = index;
-    });
-    return out;
-  }, [paneRects, hasStoredSplit]);
-  const activeLeafId = useMemo(
-    () =>
-      splitTree && activeProjectId
-        ? resolveActiveLeafId(
-            splitTree,
-            activeLeafByProject[activeProjectId],
-            activeTabId,
-          )
-        : null,
-    [splitTree, activeProjectId, activeLeafByProject, activeTabId],
-  );
-  // One cap now, not separate row/column limits: a tree has no tracks.
-  const canSplit =
-    splitEnabled && !!splitTree && leafCount(splitTree) < MAX_SPLIT_LEAVES;
-
-  useEffect(() => {
-    if (!activeProject?.remote || !activeProjectId) return;
-    if (remotePresetsByProject[activeProjectId]?.length) return;
-    let cancelled = false;
-    void window.aya
-      .listRemotePresets(activeProject.remote.sshTarget)
-      .then((remotePresets) => {
-        if (cancelled) return;
-        setRemotePresetsByProject((prev) => ({
-          ...prev,
-          [activeProjectId]: remotePresets,
-        }));
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProject, activeProjectId, remotePresetsByProject]);
+  const {
+    splitTree,
+    isSplit,
+    paneRects,
+    paneDividers,
+    splitAssignments,
+    activeLeafId,
+    canSplit,
+  } = useSplitLayoutView({
+    splitEnabled,
+    activeProject,
+    activeProjectId,
+    activeTabId,
+    singleViewByProject,
+    terminals,
+    activeLeafByProject,
+    remotePresetsByProject,
+    setRemotePresetsByProject,
+  });
 
   const visibleTerminalIds = useStable(
     useMemo(
@@ -2408,14 +871,6 @@ export function App() {
     },
     [reorderTerminalsInProject],
   );
-  const splitTerminalRight = useCallback(
-    (id: string) => addTerminalSplit(id, "right"),
-    [addTerminalSplit],
-  );
-  const splitTerminalBelow = useCallback(
-    (id: string) => addTerminalSplit(id, "below"),
-    [addTerminalSplit],
-  );
   const toggleSnippetsDrawer = useCallback(() => {
     if (!activeTerminal) return;
     setSnippetDrawerTerminalId((current) =>
@@ -2485,53 +940,8 @@ export function App() {
   const isEmpty =
     didBootstrap && projects.length === 0 && missingDirQueue.length === 0;
 
-  const showNewProjectModal = useCallback(() => {
-    setNewProjectModal({
-      defaults: { directory: "~/" },
-      lockDirectory: false,
-      title: "Open project",
-      hint: "Type a project directory. Press Tab to complete paths.",
-    });
-  }, []);
-
-  const submitProjectFromModal = useCallback(
-    async (directory: string) => {
-      const exists = await window.aya.dirExists(directory);
-      if (!exists) {
-        throw new Error("Directory does not exist.");
-      }
-      const absDir = await window.aya.expandPath(directory);
-      const existing = allProjectsRef.current.find(
-        (p) => p.directory === absDir,
-      );
-      if (existing) {
-        await openKnownProject(existing);
-        setNewProjectModal(null);
-        return;
-      }
-      await onCreateProject(
-        uniqueProjectName(allProjectsRef.current, absDir),
-        absDir,
-      );
-    },
-    [onCreateProject, openKnownProject],
-  );
-
   // Refresh the open-project handler so it sees the latest projects + state.
-  openProjectRef.current = async (rawDir: string) => {
-    const absDir = await window.aya.expandPath(rawDir);
-    // 1. Exact directory match: just switch (no-op if already active).
-    const existing = allProjectsRef.current.find((p) => p.directory === absDir);
-    if (existing) {
-      await openKnownProject(existing);
-      return;
-    }
-    // 2. Auto-create silently from basename. If the slug would collide with
-    //    another project, append a numeric suffix. The top tab can be renamed
-    //    later, so no modal is needed for the common path.
-    const name = uniqueProjectName(allProjectsRef.current, absDir);
-    await onCreateProject(name, absDir);
-  };
+  openProjectRef.current = openProject;
 
   useAppShortcuts({
     newShell: openShellTab,
