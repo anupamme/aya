@@ -31,6 +31,7 @@ import type { MacOptionKeyMode } from "../terminal-option-key";
 import type { TerminalSoundCue } from "../terminal-sound-prefs";
 import { closeFromBackdropClick, markBackdropMouseDown } from "./modal-backdrop";
 import { HOOK_THROTTLE_MINUTES } from "../main-mirrors";
+import { webHostOptions } from "../web-host-options";
 
 const DEFAULT_CLAUDE_CONFIG_DIR = "~/.claude";
 const DEFAULT_CODEX_CONFIG_DIR = "~/.codex";
@@ -1531,14 +1532,36 @@ export function SettingsModal({
               </div>
             )}
           >
-            Use Aya from a browser on another computer, behind a user and
-            password. Signing in gives full shell access to this machine and
-            there is no TLS — only expose it on a network you trust (LAN,
-            Tailscale/WireGuard, or an SSH tunnel).
+            Use Aya from a browser, behind a user and password. Signing in
+            gives full shell access to this machine. It listens on this
+            computer only: from another one, use an SSH tunnel, or choose a
+            network below. There is no TLS, so on a network the password and
+            your terminals travel unencrypted; choose only one you trust
+            (Tailscale, WireGuard or your own LAN).
             {(ayaWebError ?? ayaWeb?.error) && (
               <div style={{ color: "#f85149", marginTop: 6 }}>
                 {ayaWebError ?? ayaWeb?.error}
               </div>
+            )}
+            {ayaWeb && (
+              <label
+                style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}
+              >
+                Listen on
+                <select
+                  className="aya-modal-input"
+                  aria-label="Aya Web listen address"
+                  value={ayaWeb.host}
+                  disabled={ayaWebBusy}
+                  onChange={(e) => void applyAyaWeb({ host: e.target.value })}
+                >
+                  {webHostOptions(ayaWeb).map(([host, label]) => (
+                    <option key={host} value={host}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
             {ayaWeb?.enabled && (
               <div

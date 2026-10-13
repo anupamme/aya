@@ -217,12 +217,13 @@ import { loadWindowState, trackWindowState } from "./window-state";
 import { resolveDropTarget, WindowProjectSlices } from "./window-slices";
 import {
   generateWebPassword,
-  isWildcardHost,
   loadWebConfig,
-  LOOPBACK_HOST,
+  normalizeWebHost,
   normalizeWebPort,
   saveWebConfig,
   webCredentials,
+  webInterfaceAddresses,
+  webServerUrls,
   type WebConfig,
 } from "./web-config";
 import { captureIpcHandlers } from "./web-ipc";
@@ -1527,6 +1528,15 @@ let webConfig: WebConfig | null = null;
 let webServer: WebServerHandle | null = null;
 // Last start failure (e.g. port already in use) - surfaced in Settings.
 let webServerError: string | null = null;
+// Every load, change and (re)start of Aya Web runs one after another. Settings exists in each window and in Aya
+// Web itself; two changes at once read the same config, and the later save dropped the other change, or a disable
+// that ran while an enable was still starting found no server to stop and the server came up anyway.
+let webQueue: Promise<unknown> = Promise.resolve();
+function inWebQueue<T>(change: () => Promise<T>): Promise<T> {
+  const run = webQueue.then(change);
+  webQueue = run.catch(() => undefined);
+  return run;
+}
 // Virtual PTY-event sink: fans "pty:event" out to the web clients exactly
 // like a window's webContents. Registered while the server runs.
 const webPtySink = {
@@ -1561,22 +1571,6 @@ async function applyWebServerState(): Promise<void> {
   }
 }
 
-/** Reachable URLs for the settings UI: the pinned address, or every
- *  non-internal IPv4 when listening on all interfaces. */
-function webServerUrls(config: WebConfig): string[] {
-  if (!isWildcardHost(config.host)) {
-    return [`http://${config.host}:${config.port}`];
-  }
-  const hosts: string[] = [];
-  for (const infos of Object.values(os.networkInterfaces())) {
-    for (const info of infos ?? []) {
-      if (info.family === "IPv4" && !info.internal) hosts.push(info.address);
-    }
-  }
-  if (hosts.length === 0) hosts.push(LOOPBACK_HOST);
-  return hosts.map((host) => `http://${host}:${config.port}`);
-}
-
 function webStatus(): WebServerStatus {
   const config = webConfig;
   if (!config) {
@@ -1588,10 +1582,12 @@ function webStatus(): WebServerStatus {
       user: "",
       generatedPassword: null,
       urls: [],
+      addresses: [],
       clients: 0,
       error: webServerError,
     };
   }
+  const interfaces = os.networkInterfaces();
   return {
     enabled: config.enabled,
     running: webServer !== null,
@@ -1599,7 +1595,8 @@ function webStatus(): WebServerStatus {
     host: config.host,
     user: config.user,
     generatedPassword: config.generatedPassword ?? null,
-    urls: webServerUrls(config),
+    urls: webServerUrls(config, interfaces),
+    addresses: webInterfaceAddresses(interfaces),
     clients: webServer?.clientCount() ?? 0,
     error: webServerError,
   };
@@ -2820,11 +2817,13 @@ function registerIpc(): TeamRunner {
   });
 
   // --- Aya Web (experimental) ---
-  ipcMain.handle("web:status", async () => {
-    if (!webConfig) webConfig = await loadWebConfig();
-    return webStatus();
-  });
-  ipcMain.handle("web:configure", async (_e, req: unknown) => {
+  ipcMain.handle("web:status", () =>
+    inWebQueue(async () => {
+      if (!webConfig) webConfig = await loadWebConfig();
+      return webStatus();
+    }),
+  );
+  ipcMain.handle("web:configure", (_e, req: unknown) => inWebQueue(async () => {
     if (typeof req !== "object" || req === null) {
       throw new Error("web:configure: request must be an object");
     }
@@ -2833,6 +2832,12 @@ function registerIpc(): TeamRunner {
     const next: WebConfig = { ...webConfig };
     if (typeof r.enabled === "boolean") next.enabled = r.enabled;
     if (r.port !== undefined) next.port = normalizeWebPort(r.port);
+    if (r.host !== undefined) {
+      const host = normalizeWebHost(r.host);
+      if (!host) throw new Error("web:configure: host must be an IP address");
+      next.host = host;
+      next.hostChosen = true;
+    }
     if (typeof r.user === "string" && r.user.trim()) {
       next.user = r.user.trim();
     }
@@ -2842,21 +2847,21 @@ function registerIpc(): TeamRunner {
       delete next.generatedPassword;
       Object.assign(next, webCredentials(r.password, false));
     }
-    webConfig = next;
+    // Saved first: a failed write leaves Aya on the config it serves now, not on one that is neither saved nor
+    // served.
     await saveWebConfig(next);
+    webConfig = next;
     await applyWebServerState();
     return webStatus();
-  });
-  ipcMain.handle("web:regenerate-password", async () => {
+  }));
+  ipcMain.handle("web:regenerate-password", () => inWebQueue(async () => {
     if (!webConfig) webConfig = await loadWebConfig();
-    webConfig = {
-      ...webConfig,
-      ...webCredentials(generateWebPassword(), true),
-    };
-    await saveWebConfig(webConfig);
+    const next = { ...webConfig, ...webCredentials(generateWebPassword(), true) };
+    await saveWebConfig(next);
+    webConfig = next;
     // Existing sessions stay valid; new logins need the new password.
     return webStatus();
-  });
+  }));
   return teamRunner;
 }
 
@@ -3131,11 +3136,11 @@ app.whenReady().then(async () => {
   // Aya Web (experimental): start the browser-access server when enabled.
   // Off the critical path - a bad config or busy port must not block boot;
   // the failure lands in webServerError and shows up in Settings.
-  void loadWebConfig()
-    .then(async (config) => {
-      webConfig = config;
-      await applyWebServerState();
-    })
+  void inWebQueue(async () => {
+    // Settings may have loaded or changed the config already; that one stands.
+    if (!webConfig) webConfig = await loadWebConfig();
+    await applyWebServerState();
+  })
     .catch((err: unknown) => {
       webServerError = err instanceof Error ? err.message : String(err);
     });
