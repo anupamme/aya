@@ -17,9 +17,7 @@ import {
 import { autoUpdater } from "electron-updater";
 import { installApplicationMenu, setStaleMenuIcon } from "./app-menu";
 import { showAyaAboutPanel } from "./about-panel";
-import { installWindowZoom } from "./zoom";
-import { readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOrCreateProject, listProjects, listProjectState, saveProjectState } from "./config";
@@ -29,27 +27,19 @@ import { createCliSetup, findExecutableOnPath, pathEntries } from "./cli-setup";
 import { startConfigWatcher } from "./config-watcher";
 import { noteUserAnswer, onStatusPushed, outstandingWaiting } from "./agent-status";
 import { deliverTeamMessage, paneOutputMarks, settledAfterSubmit, startControlServer, type ControlStatusSink, type TurnProbe } from "./control";
-import { confirmOpen, deliverOpenProject, replayOpensOnLoad } from "./open-delivery";
-import { createWindowSource } from "./window-for-open";
+import { confirmOpen, dispatchOpenProject, findDirInArgv, logOpenFailure } from "./open-delivery";
+import { createAyaWindows } from "./windows";
 import { createCliAdoptionStore } from "./cli-adoption";
 import { dropCodexBriefSections, rewriteIfChanged } from "./codex-brief";
-import {
-  briefText,
-  antigravityBriefFile,
-  withOwnedBrief,
-  withoutOwnedBrief,
-} from "./agent-brief";
-import { paneTeamRole } from "./team-files";
+import { syncAntigravityBrief } from "./agent-brief";
 import { pathExists } from "./path-exists";
 import {
-  fileLaunchRecords,
+  createPaneBriefDeps,
   loginShellEnv,
   removePaneBrief,
   roleNoteReport,
   sweepPaneBriefs,
   withAgentBrief,
-  type PaneBriefDeps,
-  type RoleRef,
 } from "./pane-brief";
 import { createSpawnGate } from "./spawn-gate";
 import {
@@ -63,10 +53,9 @@ import { launchBlockOf, launchHoldOf, launchNoteOf } from "./launch-mode";
 import { reachedAyaPanes } from "./reached-aya";
 import { debugPane, watchDebugSwitch } from "./team-debug";
 import { userShell } from "./shell";
-import { registerTeamIpc } from "./team-ipc";
+import { registerTeamIpc } from "./ipc/team-ipc";
 import { askWindowToOpenPanes, newPaneId, RendererRequests, paneAliveOf, presetAgent, teamPaneDeps, type PaneHost } from "./team-panes";
 import { confirmRestart, type RelaunchDeps } from "./relaunch-notes";
-import { restartStaleHost } from "./update-quit";
 import { createUpdates, UPDATE_AUTO_CHECK_DELAY_MS } from "./updates";
 import { notePathRepaired, presetInstalled } from "./command-probe";
 import type { TeamRunner } from "./team-runner";
@@ -88,8 +77,9 @@ import {
   AGENT_BRIEF_FILES_FILE,
 } from "./paths";
 import { createPtyLog } from "./pty-log";
+import { createGpuDeathHandler, diagnosticsReport } from "./diagnostics";
 import { watchOmarchyTheme } from "./omarchy";
-import { isInternalNavigationUrl, parseExternalUrl } from "./navigation";
+import { openExternalUrl } from "./navigation";
 import { listPresets, type AgentKind } from "./presets";
 import { expandUserPath } from "./usage";
 import { DEFAULT_CODEX_HOME } from "./usage-codex";
@@ -98,24 +88,18 @@ import { refreshStatusHookScript, migrateStatusHookCommand } from "./status-hook
 import { refreshStatusCodexHookScript } from "./status-hook-codex";
 import { repairProcessPath, resolveLoginShellPath } from "./shell-path";
 import { paneReadText } from "./pane-render";
-import { PTY_HOST_EXIT_WAIT_MS, PtyHostClient, waitForExit } from "./pty-host-client";
+import { PtyHostClient, waitForExit } from "./pty-host-client";
 import { homeSocketProblems } from "./socket-path";
 import { PTY_HOST_SCRIPT_NAME } from "./pty-host-staleness";
 import { liveHostRecords, reapStaleHostRecords } from "./pty-host-registry";
-import { gatherHostHealth, probeSocketPid, type HostHealth } from "./pty-host-health";
+import { createPtyHostHealth, probeSocketPid } from "./pty-host-health";
 import { HOOK_VIA } from "./constants";
 import { sweepLegacyAyaProcesses } from "./pty-host-sweep";
 import { withSharedDirCommand } from "./agent-session";
 import { loadWindowState, trackWindowState } from "./window-state";
-import { WindowProjectSlices } from "./window-slices";
-import {
-  loadWebConfig,
-  saveWebConfig,
-  webInterfaceAddresses,
-  webServerUrls,
-  type WebConfig,
-} from "./web-config";
-import { captureIpcHandlers } from "./web-ipc";
+import { createWindowProjectState } from "./window-slices";
+import { loadWebConfig, saveWebConfig } from "./web-config";
+import { captureIpcHandlers } from "./ipc/web-capture";
 import { registerEnvIpc } from "./ipc/env-ipc";
 import { registerWindowIpc } from "./ipc/window-ipc";
 import { registerSystemIpc } from "./ipc/system-ipc";
@@ -123,9 +107,9 @@ import { registerUsageIpc } from "./ipc/usage-ipc";
 import { registerSettingsIpc } from "./ipc/settings-ipc";
 import { registerRemoteIpc } from "./ipc/remote-ipc";
 import { registerProjectsIpc } from "./ipc/projects-ipc";
-import { registerAyaWebIpc } from "./ipc/aya-web-ipc";
+import { createAyaWeb, registerAyaWebIpc } from "./ipc/aya-web-ipc";
 import { registerPtyIpc } from "./ipc/pty-ipc";
-import { startWebServer, type WebServerHandle } from "./web-server";
+import { startWebServer } from "./web-server";
 import {
   appleHelperPath,
   normalizeAyaIntelligenceConfig,
@@ -138,10 +122,7 @@ import {
 import { restartDialog } from "./native-ui-text";
 import type {
   ControlStatusUpdate,
-  DiagnosticsReport,
   SpawnRequest,
-  ProjectCollectionState,
-  WebServerStatus,
 } from "./types";
 
 const DEV_SERVER_URL = "http://localhost:5183";
@@ -155,20 +136,9 @@ const cliAdoption = createCliAdoptionStore(CLI_ADOPTION_FILE);
 // Maximum number of entries returned by path completion
 // Maximum number of keyboard-navigable projects (Cmd/Ctrl+1..9)
 const MAX_KEYBOARD_PROJECTS = 9;
-// Minimum dimensions of the main application window (px)
-const WINDOW_MIN_WIDTH = 800;
-const WINDOW_MIN_HEIGHT = 500;
 // Theme colors shared between About-dialog CSS and BrowserWindow chrome
 const COLOR_DARK_BG = "#0d1117";
 const COLOR_LIGHT_TEXT = "#f0f6fc";
-// Cascade offset for a window opened from another window (File > New Window,
-// tab tear-out), so it doesn't cover its parent exactly.
-const NEW_WINDOW_CASCADE_OFFSET_PX = 28;
-const TEAR_OUT_CURSOR_OFFSET_X_PX = 80;
-const TEAR_OUT_CURSOR_OFFSET_Y_PX = 20;
-// Heal nudges after a GPU death: the typical relaunch window, then a safety net
-// (a no-op once the WebGL context is live again).
-const GPU_HEAL_NUDGE_DELAYS_MS = [1200, 3000];
 
 const PTY_HOST_SCRIPT = path.join(__dirname, PTY_HOST_SCRIPT_NAME);
 const ptyHost = new PtyHostClient(PTY_HOST_SCRIPT);
@@ -207,7 +177,7 @@ const teamDeps: TeamControlDeps = {
   agentOf: paneAgent,
   headCommit,
   treeState: workingTreeState,
-  starting: () => !bootProjectsLoaded,
+  starting: () => !windowProjects.bootProjectsLoaded,
 };
 /** A pane's rendered text, as `aya pane read` gets it; null when it is not running. */
 async function paneScreen(terminalId: string): Promise<string | null> {
@@ -253,67 +223,38 @@ const teamPaneHost: PaneHost = {
   // The window that shows the project adds the tabs; main picked their ids.
   openPanes: (projectSlug, panes) => {
     const windowId = windowSlices.windowOf(projectSlug);
-    return askWindowToOpenPanes(windowId === null ? null : BrowserWindow.fromId(windowId), paneOpens, projectSlug, panes, !bootProjectsLoaded);
+    return askWindowToOpenPanes(windowId === null ? null : BrowserWindow.fromId(windowId), paneOpens, projectSlug, panes, !windowProjects.bootProjectsLoaded);
   },
   newPaneId,
-  expectRoles: (roles) => {
-    for (const { ptyId, team, role } of roles) pendingPaneRoles.set(ptyId, { team, role });
-    return () => roles.forEach(({ ptyId }) => pendingPaneRoles.delete(ptyId));
-  },
+  expectRoles: (roles) => expectPaneRoles(roles),
 };
-// Cap of $PATH entries returned to the renderer diagnostics view.
-const MAX_PATH_ENTRIES_RETURNED = 40;
-// Delay before re-probing a host that answered the version handshake with
-// null - long enough for a slow cold spawn to finish listening.
-const STALE_HOST_REPROBE_DELAY_MS = 1_000;
-// macOS needs a moment after fullscreen transitions before the window hack
-// can be re-applied.
-const MACOS_FULLSCREEN_HACK_DELAY_MS = 250;
 // Delay before the Phase-2 legacy sweep (stray pre-registry hosts + orphaned
 // terminal children of dead hosts). Off the startup path: nothing it targets
 // can interfere with the fresh session, so first paint never pays for it.
 const LEGACY_SWEEP_DELAY_MS = 5_000;
-let macosWindowHack:
-  | {
-      apply(handle: Buffer): void;
-    }
-  | null
-  | undefined;
-
-function applyMacOsWindowHack(win: BrowserWindow): void {
-  if (process.platform !== "darwin" || win.isDestroyed()) return;
-  if (macosWindowHack === undefined) {
-    try {
-      macosWindowHack = require(path.join(__dirname, "macos-window-hack.node")) as {
-        apply(handle: Buffer): void;
-      };
-    } catch (error) {
-      macosWindowHack = null;
-      if (IS_DEV) console.warn("macOS window hack unavailable", error);
-    }
-  }
-  if (!macosWindowHack) return;
-  try {
-    macosWindowHack.apply(win.getNativeWindowHandle());
-  } catch (error) {
-    if (IS_DEV) console.warn("macOS window hack failed", error);
-  }
-}
-
-function isAyaFullScreen(win: BrowserWindow): boolean {
-  return win.isFullScreen();
-}
-
-function setAyaFullScreen(win: BrowserWindow, value: boolean): void {
-  if (win.isDestroyed()) return;
-  win.setFullScreen(value);
-  win.webContents.send("app:fullscreen", isAyaFullScreen(win));
-}
-
-function toggleAyaFullScreen(win: BrowserWindow | null): void {
-  if (!win || win.isDestroyed()) return;
-  setAyaFullScreen(win, !isAyaFullScreen(win));
-}
+const windowProjects = createWindowProjectState({ listProjectState, saveProjectState, quitting: () => appQuitting });
+const windows = createAyaWindows({
+  BrowserWindow,
+  ptyHost,
+  platform: process.platform,
+  mainDirname: __dirname,
+  windowTitle: WINDOW_TITLE,
+  darkBackground: COLOR_DARK_BG,
+  isDev: IS_DEV,
+  isE2eHeadless: IS_E2E_HEADLESS,
+  devServerUrl: DEV_SERVER_URL,
+  rendererIndexPath: RENDERER_INDEX_PATH,
+  maxKeyboardProjects: MAX_KEYBOARD_PROJECTS,
+  loadWindowState,
+  trackWindowState,
+  startConfigWatcher,
+  openExternalUrl: (raw) => openExternalUrl(raw, { shell }),
+  claimBootWindow: windowProjects.claimBootWindow,
+  releaseWindowSlices: windowProjects.releaseWindowSlices,
+  quitting: () => appQuitting,
+});
+const { ayaWindows, focusedAyaWindow, eachAyaWindow, createWindow, openNewWindow, createWindowOnce, windowForOpen, isAyaFullScreen, setAyaFullScreen, toggleAyaFullScreen } = windows;
+const { windowSlices, projectStateForWindow } = windowProjects;
 
 const { cliStatus, installCli, healDeadCliShims } = createCliSetup({
   app,
@@ -321,124 +262,38 @@ const { cliStatus, installCli, healDeadCliShims } = createCliSetup({
   isDev: IS_DEV,
 });
 
-/** One Aya-owned rules file for every antigravity preset: present while any
- *  of them opts in, deleted once none does (or none is left). */
-async function syncAntigravityBrief(): Promise<void> {
-  const presets = (await listPresets()).filter((p) => p.agent === "antigravity");
-  const file = antigravityBriefFile(os.homedir());
-  const on = presets.some((p) => p.agentBrief === true);
-  await rewriteIfChanged(file, (c) =>
-    on ? withOwnedBrief(c, briefText(true)) : withoutOwnedBrief(c),
-  ).catch((err) => console.warn(`[aya] could not sync the aya brief at ${file}:`, err));
-}
+const antigravityBriefDeps = { listPresets, home: () => os.homedir(), rewrite: rewriteIfChanged };
 
-/** Roles of panes that `team open` is about to open: they spawn before the role is saved. */
-const pendingPaneRoles = new Map<string, RoleRef>();
-const paneBriefDeps: PaneBriefDeps = {
+const { paneBriefDeps, expectRoles: expectPaneRoles } = createPaneBriefDeps({
   ayaHome: AYA_HOME,
   defaultCodexHome: DEFAULT_CODEX_HOME,
   expand: expandUserPath,
-  shellEnv: loginShellEnv,
   listPresets: () => listPresets(),
-  paneRole: async (spawn) => {
-    const pending = pendingPaneRoles.get(spawn.ptyId);
-    if (pending) return pending;
-    const project = (await listProjects()).find((p) => p.slug === spawn.projectSlug);
-    return project ? paneTeamRole(AYA_HOME, project, spawn.ptyId) : null;
-  },
-  records: fileLaunchRecords(PANE_LAUNCH_ROLES_FILE),
+  listProjects: () => listProjects(),
+  recordsFile: PANE_LAUNCH_ROLES_FILE,
   starts: (spawn) => ptyHost.willStart(spawn),
   running: paneRunning,
-};
+});
 
-/** The version of the host the client WOULD spawn, from package.json as the host reads it: app.getVersion()
- *  is Electron's own outside a packaged app, and that mismatch killed a current host on every dev/e2e boot. */
-const EXPECTED_HOST_VERSION: string = (() => {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(path.join(__dirname, "..", "package.json"), "utf-8"),
-    ) as { version?: string };
-    if (typeof pkg.version === "string") return pkg.version;
-  } catch {
-    // fall through to app.getVersion() - correct in packaged builds
-  }
-  return app.getVersion();
-})();
-
-async function diagnosticsReport(): Promise<DiagnosticsReport> {
-  const [presets, projects, projectState, usageHook, cli, health, adoption] =
-    await Promise.all([
-      listPresets(),
-      listProjects(),
-      listProjectState(),
-      usageHookStatus(),
-      cliStatus(),
-      hostHealth(),
-      cliAdoption.summary(),
-    ]);
-  return {
-    generatedAt: new Date().toISOString(),
-    app: {
-      version: app.getVersion(),
-      mode: IS_DEV ? "development" : "production",
-      platform: process.platform,
-      arch: process.arch,
-      pid: process.pid,
-      cwd: process.cwd(),
-    },
-    paths: {
-      ayaHome: AYA_HOME,
-      controlSocket: CONTROL_SOCKET_PATH,
-      remoteSocket: REMOTE_SOCKET_PATH,
-      ptyHostSocket: PTY_HOST_SOCKET_PATH,
-      controlSocketExists: await pathExists(CONTROL_SOCKET_PATH),
-      remoteSocketExists: await pathExists(REMOTE_SOCKET_PATH),
-      ptyHostSocketExists: await pathExists(PTY_HOST_SOCKET_PATH),
-    },
-    shell: {
-      shell: process.env.SHELL ?? null,
-      pathEntries: pathEntries().slice(0, MAX_PATH_ENTRIES_RETURNED),
-    },
-    cli,
-    cliAdoption: adoption,
-    ptyHost: {
-      expected: health.expected,
-      actual: health.identity,
-      ptyCount: health.ptyCount,
-      stale: health.stale,
-      pid: health.pid,
-      socket: health.socket,
-      otherHosts: health.otherHosts,
-      warnings: health.warnings,
-    },
-    presets: presets.map((preset) => ({
-      id: preset.id,
-      name: preset.name,
-      agent: preset.agent,
-      command: preset.command,
-      ...(preset.configDir ? { configDir: preset.configDir } : {}),
-      ...(typeof preset.autoResume === "boolean"
-        ? { autoResume: preset.autoResume }
-        : {}),
-      ...(typeof preset.unsafeMode === "boolean"
-        ? { unsafeMode: preset.unsafeMode }
-        : {}),
-      ...(preset.agentBrief ? { agentBrief: true } : {}),
-    })),
-    projects: {
-      total: projects.length,
-      open: projectState.open.length,
-      recent: projectState.recent.length,
-      remote: projects.filter((project) => !!project.remote).length,
-    },
-    usage: {
-      claudeAccounts: presets.filter((preset) => preset.agent === "claude").length,
-      codexAccounts: presets.filter((preset) => preset.agent === "codex").length,
-      hookInstalled: usageHook.installed,
-      hookScriptPath: usageHook.scriptPath,
-    },
-  };
-}
+const { EXPECTED_HOST_VERSION, handleStaleHost, hostHealth, restartHostFromWindow, stopOtherHostsFromWindow,
+  staleHostDetected } = createPtyHostHealth({
+  app,
+  mainDirname: __dirname,
+  ptyHost,
+  relaunchDeps,
+  askRestart,
+  confirmLosingWork,
+  focusedAyaWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  setStaleMenuIcon: () => setStaleMenuIcon(applicationMenuDeps),
+  socketExists: () => pathExists(PTY_HOST_SOCKET_PATH),
+  probeSocket: () => probeSocketPid(PTY_HOST_SOCKET_PATH),
+  liveRecords: () => liveHostRecords(PTY_HOST_SCRIPT),
+  kill: (pid, signal) => process.kill(pid, signal),
+  waitForExit,
+});
 
 function configureAppIdentity(): void {
   // Keep macOS menu/about/notification surfaces aligned. Dev runs inside
@@ -515,60 +370,6 @@ function devIconPath(): string {
   return path.join(__dirname, "..", "build", "icon.png");
 }
 
-async function openExternalUrl(raw: string): Promise<void> {
-  const parsed = parseExternalUrl(raw);
-  if (!parsed) throw new Error("Unsupported external URL.");
-  if (parsed.protocol === "file:") {
-    const error = await shell.openPath(fileURLToPath(parsed));
-    if (error) throw new Error(error);
-    return;
-  }
-  await shell.openExternal(parsed.toString());
-}
-
-/** The first positional argv value that is an existing directory (`aya /path/to/project`); in dev argv
- *  includes Electron's own args. */
-function findDirInArgv(argv: readonly string[]): string | null {
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i];
-    if (!a || a.startsWith("-")) continue;
-    // Skip arguments that obviously aren't user-supplied paths.
-    if (a.endsWith("main.js") || a.includes("node_modules/electron")) continue;
-    if (a === ".") {
-      // Relative-to-cwd. We get a sensible cwd from `second-instance`'s
-      // workingDirectory arg; the initial argv case handles "." via
-      // process.cwd().
-      try {
-        return path.resolve(process.cwd());
-      } catch {
-        continue;
-      }
-    }
-    try {
-      const resolved = path.resolve(a);
-      if (statSync(resolved).isDirectory()) return resolved;
-    } catch {
-      // Not a real directory - keep searching.
-      continue;
-    }
-  }
-  return null;
-}
-
-/** An "open this project" request (another process, or our own argv) for the renderer, which switches to,
- *  creates, or ignores the project. */
-function dispatchOpenProject(
-  win: BrowserWindow | null,
-  dir: string | null,
-): Promise<void> {
-  if (!win || !dir) return Promise.resolve();
-  return deliverOpenProject(win, dir);
-}
-
-function logOpenFailure(dir: string | null): (err: unknown) => void {
-  return (err) => console.warn(`[aya] could not open ${dir}:`, err);
-}
-
 function dispatchShortcut(action: string): void {
   const target = focusedAyaWindow();
   if (!target || target.isDestroyed()) return;
@@ -587,9 +388,6 @@ const aboutPanelDeps = {
   devIconPath,
 };
 
-// Set to true when a stale PTY host is detected on launch (#28). The Restart
-// Aya menu item reads this flag so it can kill the stale host before relaunching.
-let staleHostDetected = false;
 // Deferred Phase-2 legacy-sweep timer; cancelled on quit so a mid-teardown
 // sweep can't spawn a host or probe processes while the app is exiting.
 let legacySweepTimer: NodeJS.Timeout | null = null;
@@ -601,84 +399,16 @@ const TEAM_QUIT_SETTLE_MS = 2_000;
 let teamsAtQuit: TeamRunner | null = null;
 let teamsStopped = false;
 
-// --- Aya Web (experimental): browser access over HTTP + WebSocket ---
-let webConfig: WebConfig | null = null;
-let webServer: WebServerHandle | null = null;
-// Last start failure (e.g. port already in use) - surfaced in Settings.
-let webServerError: string | null = null;
-// Every load, change and (re)start of Aya Web runs one after another. Settings exists in each window and in Aya
-// Web itself; two changes at once read the same config, and the later save dropped the other change, or a disable
-// that ran while an enable was still starting found no server to stop and the server came up anyway.
-let webQueue: Promise<unknown> = Promise.resolve();
-function inWebQueue<T>(change: () => Promise<T>): Promise<T> {
-  const run = webQueue.then(change);
-  webQueue = run.catch(() => undefined);
-  return run;
-}
-// Virtual PTY-event sink: fans "pty:event" out to the web clients exactly
-// like a window's webContents. Registered while the server runs.
-const webPtySink = {
-  isDestroyed: () => false,
-  send: (channel: "pty:event", event: unknown) => {
-    webServer?.broadcast(channel, event);
-  },
-};
-
-/** (Re)apply the current web config: stop the running server, then start a
- *  fresh one when enabled. Start failures are recorded, never thrown. */
-async function applyWebServerState(): Promise<void> {
-  if (webServer) {
-    ptyHost.detachWebContents(webPtySink);
-    const closing = webServer;
-    webServer = null;
-    await closing.close();
-  }
-  webServerError = null;
-  const config = webConfig;
-  if (!config || !config.enabled) return;
-  try {
-    webServer = await startWebServer({
-      appVersion: app.getVersion(),
-      isDev: IS_DEV,
-      distDir: RENDERER_DIST_DIR,
-      getConfig: () => webConfig ?? config,
-    });
-    ptyHost.attachWebContents(webPtySink);
-  } catch (err) {
-    webServerError = err instanceof Error ? err.message : String(err);
-  }
-}
-
-function webStatus(): WebServerStatus {
-  const config = webConfig;
-  if (!config) {
-    return {
-      enabled: false,
-      running: false,
-      port: 0,
-      host: "",
-      user: "",
-      generatedPassword: null,
-      urls: [],
-      addresses: [],
-      clients: 0,
-      error: webServerError,
-    };
-  }
-  const interfaces = os.networkInterfaces();
-  return {
-    enabled: config.enabled,
-    running: webServer !== null,
-    port: config.port,
-    host: config.host,
-    user: config.user,
-    generatedPassword: config.generatedPassword ?? null,
-    urls: webServerUrls(config, interfaces),
-    addresses: webInterfaceAddresses(interfaces),
-    clients: webServer?.clientCount() ?? 0,
-    error: webServerError,
-  };
-}
+const ayaWeb = createAyaWeb({
+  app,
+  ptyHost,
+  isDev: IS_DEV,
+  distDir: RENDERER_DIST_DIR,
+  loadWebConfig,
+  saveWebConfig,
+  startWebServer,
+  networkInterfaces: () => os.networkInterfaces(),
+});
 
 const applicationMenuDeps = {
   app,
@@ -687,7 +417,7 @@ const applicationMenuDeps = {
   platform: process.platform,
   windowTitle: WINDOW_TITLE,
   maxKeyboardProjects: MAX_KEYBOARD_PROJECTS,
-  staleHostDetected: () => staleHostDetected,
+  staleHostDetected,
   confirmLosingWork,
   ptyHost,
   showAyaAboutPanel: () => showAyaAboutPanel(aboutPanelDeps),
@@ -697,307 +427,6 @@ const applicationMenuDeps = {
   toggleAyaFullScreen,
   configureAppIdentity,
 };
-
-interface WindowGeometry {
-  x?: number;
-  y?: number;
-  width: number;
-  height: number;
-  isFullScreen: boolean;
-  isMaximized: boolean;
-}
-
-/** An extra, empty window cascaded from the focused one, or under the cursor for a tab tear-out; it owns no
- *  projects until one is opened or moved into it (see projectStateForWindow). */
-async function openNewWindow(at?: {
-  x: number;
-  y: number;
-}): Promise<BrowserWindow> {
-  const anchor = focusedAyaWindow();
-  const size = anchor
-    ? anchor.getBounds()
-    : { ...(await loadWindowState()), x: undefined, y: undefined };
-  const position = at
-    ? // Nudge so the cursor lands on the new window's tab strip, not its corner.
-      { x: Math.max(0, at.x - TEAR_OUT_CURSOR_OFFSET_X_PX), y: Math.max(0, at.y - TEAR_OUT_CURSOR_OFFSET_Y_PX) }
-    : anchor
-      ? {
-          x: anchor.getBounds().x + NEW_WINDOW_CASCADE_OFFSET_PX,
-          y: anchor.getBounds().y + NEW_WINDOW_CASCADE_OFFSET_PX,
-        }
-      : { x: size.x, y: size.y };
-  return createWindow({
-    x: position.x,
-    y: position.y,
-    width: size.width,
-    height: size.height,
-    isFullScreen: false,
-    isMaximized: false,
-  });
-}
-
-function createWindow(initial: WindowGeometry): BrowserWindow {
-  const win = new BrowserWindow({
-    x: initial.x,
-    y: initial.y,
-    width: initial.width,
-    height: initial.height,
-    minWidth: WINDOW_MIN_WIDTH,
-    minHeight: WINDOW_MIN_HEIGHT,
-    title: WINDOW_TITLE,
-    ...(process.platform === "darwin"
-      ? { titleBarStyle: "hidden" as const }
-      : {}),
-    ...(process.platform === "linux"
-      ? { frame: false, roundedCorners: false }
-      : {}),
-    backgroundColor: COLOR_DARK_BG,
-    show: false,
-    webPreferences: {
-      // One file from vite.preload.config.mts: a sandboxed preload cannot require its own modules.
-      preload: path.join(__dirname, "preload.bundle.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      // node-pty runs only in the pty-host, so the window needs no Node: a script injected into it
-      // gets Chromium's sandbox, not the user's rights.
-      sandbox: true,
-      // In headless e2e the window is never shown, so Chromium would throttle
-      // requestAnimationFrame and xterm's render loop would never paint - the
-      // tests that read rendered rows then time out. Keep the hidden test
-      // window fully active. Production keeps the default (throttle when
-      // backgrounded to save power).
-      ...(IS_E2E_HEADLESS ? { backgroundThrottling: false } : {}),
-    },
-  });
-
-  if (process.platform === "darwin") {
-    win.setWindowButtonVisibility(false);
-    applyMacOsWindowHack(win);
-  }
-
-  if (initial.isMaximized) win.maximize();
-  if (initial.isFullScreen) setAyaFullScreen(win, true);
-
-  // Persist geometry changes; the helper handles debouncing + final flush.
-  // Only the boot window drives the saved single-window geometry; secondary
-  // windows are session-only (a restart collapses back to one window).
-  if (ayaWindows.size === 0) trackWindowState(win);
-
-  // Multi-window registry: PTY events broadcast to every live window, and
-  // `mainWindow` follows focus so outside actions have a target.
-  ayaWindows.add(win);
-  mainWindow = win;
-  if (bootWindowId === null) bootWindowId = win.id;
-  const windowId = win.id;
-  // Captured now: the webContents getter throws after 'closed'.
-  const windowWebContents = win.webContents;
-  win.on("focus", () => {
-    mainWindow = win;
-  });
-  ptyHost.attachWebContents(windowWebContents);
-
-  // Watch ~/.aya/ for edits to snippets/presets/themes made outside the app
-  // and reload that slice in the renderer. Stopped when the window closes.
-  const stopConfigWatcher = startConfigWatcher(win);
-
-  win.once("ready-to-show", () => {
-    if (!IS_E2E_HEADLESS) win.show();
-  });
-  win.on("closed", () => {
-    // De-register FIRST: if any cleanup below ever throws, a dead window must
-    // not linger in the registry (it would show up as a phantom "Move to
-    // window…" target).
-    ayaWindows.delete(win);
-    // Keep the module-level ref in sync so second-instance handlers don't
-    // try to focus a destroyed window.
-    if (mainWindow === win) {
-      mainWindow = [...ayaWindows].at(-1) ?? null;
-    }
-    ptyHost.detachWebContents(windowWebContents);
-    stopConfigWatcher();
-    // The closed window's projects fall back to recent; PTYs keep running in
-    // the detached host (same contract as an app restart).
-    void releaseWindowSlices(windowId);
-  });
-
-  // Notify the renderer when fullscreen state changes so the topbar can drop
-  // its left padding (which is there to clear the traffic-light buttons -
-  // those buttons hide in fullscreen).
-  const sendFullScreen = (isFs: boolean) => {
-    if (!win.isDestroyed()) win.webContents.send("app:fullscreen", isFs);
-  };
-  const sendMaximized = (isMaximized: boolean) => {
-    if (!win.isDestroyed()) win.webContents.send("app:maximized", isMaximized);
-  };
-  win.on("enter-full-screen", () => {
-    sendFullScreen(true);
-    applyMacOsWindowHack(win);
-    setTimeout(() => applyMacOsWindowHack(win), MACOS_FULLSCREEN_HACK_DELAY_MS);
-  });
-  win.on("leave-full-screen", () => {
-    sendFullScreen(false);
-    applyMacOsWindowHack(win);
-  });
-  win.on("maximize", () => sendMaximized(true));
-  win.on("unmaximize", () => sendMaximized(false));
-  // Initial broadcast once the renderer is ready (also useful if a future
-  // restart preserves fullscreen state).
-  replayOpensOnLoad(win);
-  win.webContents.once("did-finish-load", () => {
-    sendFullScreen(isAyaFullScreen(win));
-    sendMaximized(win.isMaximized());
-    applyMacOsWindowHack(win);
-  });
-
-  // External links must never navigate Aya's BrowserWindow. xterm's web-links
-  // addon normally calls our IPC handler, but Chromium/Electron can still see
-  // window.open or direct navigation paths depending on timing and modifier
-  // keys. Catch both centrally and hand safe external URLs to the OS.
-  const handleExternalNavigation = (
-    event: { preventDefault(): void },
-    url: string,
-  ) => {
-    if (
-      isInternalNavigationUrl(url, {
-        isDev: IS_DEV,
-        devServerUrl: DEV_SERVER_URL,
-        appIndexPath: RENDERER_INDEX_PATH,
-      })
-    ) {
-      return;
-    }
-    event.preventDefault();
-    if (parseExternalUrl(url)) void openExternalUrl(url);
-  };
-
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (parseExternalUrl(url)) void openExternalUrl(url);
-    return { action: "deny" };
-  });
-  win.webContents.on("will-navigate", (event, url) => {
-    handleExternalNavigation(event, url);
-  });
-  (
-    win.webContents as typeof win.webContents & {
-      on(
-        channel: "will-frame-navigate",
-        listener: (
-          event: { preventDefault(): void },
-          details: { url: string },
-        ) => void,
-      ): void;
-    }
-  ).on(
-    "will-frame-navigate",
-    (event: { preventDefault(): void }, details: { url: string }) => {
-      handleExternalNavigation(event, details.url);
-    },
-  );
-
-  // Intercept keyboard shortcuts at the BrowserWindow level so they fire
-  // even while xterm.js has focus (otherwise xterm would forward them to the
-  // PTY). Calling event.preventDefault() prevents both the page and the
-  // default menu from receiving the keystroke.
-  installWindowZoom(win.webContents);
-  win.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown") return;
-    const isMac = process.platform === "darwin";
-    const mod = isMac ? input.meta : input.control;
-    if (!mod) return;
-    if (input.alt && !input.shift) {
-      let action: string | null = null;
-      if (input.key === "ArrowLeft") action = "focus-pane-left";
-      else if (input.key === "ArrowRight") action = "focus-pane-right";
-      else if (input.key === "ArrowUp") action = "focus-pane-up";
-      else if (input.key === "ArrowDown") action = "focus-pane-down";
-      else if (input.key === "\\" || input.code === "Backslash") {
-        action = "split-pane-right";
-      } else if (input.key === "-") {
-        action = "split-pane-below";
-      }
-      if (!action) return;
-      event.preventDefault();
-      if (!win.isDestroyed()) win.webContents.send("shortcut", action);
-      return;
-    }
-    // Don't trigger our shortcuts if extra modifiers we don't bind are held -
-    // e.g. Cmd+Shift+T should NOT fire our Cmd+T action.
-    if (input.shift || input.alt) return;
-    const key = input.key.toLowerCase();
-    if (key === "r") {
-      event.preventDefault();
-      return;
-    }
-    let action: string | null = null;
-    if (key === "t") action = "new-shell";
-    else if (key === "w") action = "close-tab";
-    else if (key === ",") action = "open-settings";
-    else if (key === "[") action = "prev-tab";
-    else if (key === "]") action = "next-tab";
-    else if (key === "f") action = "find-in-pane";
-    else if (key === "k") action = "search";
-    else if (key.length === 1 && key >= "1" && key <= String(MAX_KEYBOARD_PROJECTS)) {
-      action = `project-${key}`;
-    }
-    if (!action) return;
-    event.preventDefault();
-    if (!win.isDestroyed()) win.webContents.send("shortcut", action);
-  });
-
-  if (IS_DEV) {
-    win.loadURL(DEV_SERVER_URL);
-    win.webContents.openDevTools({ mode: "detach" });
-  } else {
-    win.loadFile(RENDERER_INDEX_PATH);
-  }
-
-  return win;
-}
-
-/** On launch, reap a stale PTY host (#28) even with live terminals, asking first when a pane shows background work
- *  (a no keeps it, with Restart Aya's red dot). Best-effort; a pre-#73 host may orphan a signal-ignoring child once. */
-async function handleStaleHost(): Promise<void> {
-  try {
-    let health = await hostHealth();
-    // A running host this Aya cannot reach (no socket, or another host on it): its terminals show nowhere, and the
-    // first pane would start another host and resume every agent a second time. Asked, like any stop of work.
-    if (health.otherHosts.length > 0 && (await askStopOtherHosts(health.otherHosts.length, "Aya found"))) {
-      await stopHosts(health.otherHosts.map((host) => host.pid));
-      health = await hostHealth();
-    }
-    if (health.identity === null && health.stale) {
-      // identity null is ALSO returned for transient client-side failures (e.g.
-      // a >5s cold-spawn socket wait). Acting on it immediately would shut down
-      // the freshly-spawned, current-version host. Re-probe once after a short
-      // delay: a genuinely ancient host fails the version request consistently,
-      // while a slow spawn answers with a matching identity the second time.
-      await new Promise((resolve) => setTimeout(resolve, STALE_HOST_REPROBE_DELAY_MS));
-      health = await hostHealth();
-    }
-    if (!health.stale) return;
-    // The update is in, but the panes' background work still runs on the old host: ask, unless Restart to update did.
-    let exited = true;
-    if (
-      !(await restartStaleHost(relaunchDeps, (text) => askRestart("Restart terminals", text), async () => {
-        exited = await ptyHost.restart();
-      }))
-    ) {
-      showStaleHost(true);
-      return;
-    }
-    // restart() swallows request errors by design (an old host may not honor
-    // "shutdown"), so returning is NOT proof the host died. Verify: re-probe the
-    // socket; a fresh current-version host (or none yet) means success, the SAME
-    // stale identity answering again means the reap failed.
-    // hostHealth() keeps the red dot on when the reap didn't take, and an old host still running past the wait keeps
-    // it too, so the user can retry. The menu may not be installed yet (this runs before createWindow), so the
-    // caller applies the icon from the flag after installApplicationMenu.
-    await hostHealth();
-    if (!exited) showStaleHost(true);
-  } catch {
-    // best-effort; a host that can't be queried is handled on next use
-  }
-}
 
 const updates = createUpdates({
   app,
@@ -1016,88 +445,6 @@ const updates = createUpdates({
   relaunchDeps,
   askRestart,
 });
-
-/** The terminal host's state, the one account behind Aya's launch check, the Restart Aya red dot and Diagnostics. */
-async function hostHealth(): Promise<HostHealth> {
-  const health = await gatherHostHealth({
-    expected: ptyHost.expectedHostIdentity(EXPECTED_HOST_VERSION),
-    connected: () => ptyHost.isConnected(),
-    status: () => ptyHost.hostStatus(),
-    socketExists: () => pathExists(PTY_HOST_SOCKET_PATH),
-    probeSocket: () => probeSocketPid(PTY_HOST_SOCKET_PATH),
-    liveRecords: () => liveHostRecords(PTY_HOST_SCRIPT),
-  });
-  showStaleHost(health.stale);
-  return health;
-}
-
-/** Asks before ending the terminals of hosts this Aya does not use. */
-async function askStopOtherHosts(count: number, who: string): Promise<boolean> {
-  const hosts = count === 1 ? "another terminal host" : `${count} other terminal hosts`;
-  const options = {
-    type: "warning" as const,
-    buttons: ["Stop", "Cancel"],
-    defaultId: 1,
-    cancelId: 1,
-    message: count === 1 ? "Stop the other terminal host?" : `Stop ${count} other terminal hosts?`,
-    detail: `${who} ${hosts} still running from before. Their terminals show in no window, and Aya would resume those agents again in its own host. Stopping ends them.`,
-  };
-  const parent = focusedAyaWindow();
-  return (await (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))).response === 0;
-}
-
-/** SIGTERM, so each host's own shutdown ends its terminals and removes its registry record; answers once they are
- *  gone, so a refreshed report no longer lists them. */
-async function stopHosts(pids: number[]): Promise<number[]> {
-  // Checked again right before the signal: a host may have exited, and its pid passed on, while Aya asked.
-  const stillHosts = new Set(liveHostRecords(PTY_HOST_SCRIPT).map((rec) => rec.pid));
-  const stopped: number[] = [];
-  for (const pid of pids.filter((p) => stillHosts.has(p))) {
-    try {
-      process.kill(pid, "SIGTERM");
-      stopped.push(pid);
-    } catch {
-      // already gone
-    }
-  }
-  await Promise.all(stopped.map((pid) => waitForExit(pid, PTY_HOST_EXIT_WAIT_MS)));
-  return stopped;
-}
-
-/** The red dot on Restart Aya follows the host's state: on while it is stale, off once it is not. */
-function showStaleHost(stale: boolean): void {
-  staleHostDetected = stale;
-  if (stale) {
-    setStaleMenuIcon(applicationMenuDeps);
-    return;
-  }
-  const item = Menu.getApplicationMenu()?.getMenuItemById("restart-aya");
-  if (item) item.icon = nativeImage.createEmpty();
-}
-
-/** Settings > Diagnostics > PTY host > Restart (and Aya Web): asks, then replaces the host. Throws when cancelled,
- *  or when the old host did not exit, so the window leaves its panes as they are. */
-async function restartHostFromWindow(): Promise<void> {
-  if (!(await confirmLosingWork("Restarting the PTY host", "Restart"))) throw new Error("restart cancelled");
-  const exited = await ptyHost.restart();
-  // The red dot follows what the host now is: off for a current host, still on if the restart did not take.
-  await hostHealth();
-  if (!exited) {
-    showStaleHost(true);
-    throw new Error(
-      `The old terminal host did not exit within ${PTY_HOST_EXIT_WAIT_MS / 1000} s; its terminals may still run. Settings > Diagnostics lists it, with Stop other hosts.`,
-    );
-  }
-}
-
-/** Settings > Diagnostics > Stop other hosts: hosts Aya does not use and that are not on the socket, re-verified now
- *  and asked about here, not in the window (Aya Web reaches this too). */
-async function stopOtherHostsFromWindow(): Promise<number[]> {
-  const health = await hostHealth();
-  if (health.otherHosts.length === 0) return [];
-  if (!(await askStopOtherHosts(health.otherHosts.length, "Settings found"))) return [];
-  return stopHosts(health.otherHosts.map((host) => host.pid));
-}
 
 function registerIpc(): TeamRunner {
   // Aya Web reuses these handlers over WebSocket - record every registration
@@ -1198,7 +545,7 @@ function registerIpc(): TeamRunner {
     senderWindow,
     dialog,
     home: () => app.getPath("home"),
-    presetsSaved: syncAntigravityBrief,
+    presetsSaved: () => syncAntigravityBrief(antigravityBriefDeps),
     intelligence: {
       summarize: (req) => summarizeLocal(intelligenceDeps, validateLocalSummaryRequest(req)),
       ollamaStatus: (model) => ollamaStatus(intelligenceDeps, model),
@@ -1212,7 +559,7 @@ function registerIpc(): TeamRunner {
     windows: () => ayaWindows,
     activeProjectOf: (id) => windowSlices.activeProjectOf(id),
     openNewWindow,
-    openProjectIn: (win, dir) => void dispatchOpenProject(win, dir).catch(logOpenFailure(dir)),
+    openProjectIn: (win, dir) => void dispatchOpenProject({ window: win }, dir).catch(logOpenFailure(dir)),
     confirmOpen,
     isFullScreen: isAyaFullScreen,
     setFullScreen: setAyaFullScreen,
@@ -1224,7 +571,7 @@ function registerIpc(): TeamRunner {
     shell,
     clipboard,
     home: () => app.getPath("home"),
-    openExternalUrl,
+    openExternalUrl: (raw) => openExternalUrl(raw, { shell }),
   });
   registerSystemIpc({
     ipcMain,
@@ -1239,7 +586,23 @@ function registerIpc(): TeamRunner {
     dock: app.dock,
     cliStatus,
     installCli,
-    diagnosticsReport,
+    diagnosticsReport: () => diagnosticsReport({
+      app,
+      isDev: IS_DEV,
+      ayaHome: AYA_HOME,
+      controlSocketPath: CONTROL_SOCKET_PATH,
+      remoteSocketPath: REMOTE_SOCKET_PATH,
+      ptyHostSocketPath: PTY_HOST_SOCKET_PATH,
+      listPresets,
+      listProjects,
+      listProjectState,
+      usageHookStatus,
+      cliStatus,
+      hostHealth,
+      cliAdoption,
+      pathExists,
+      pathEntries,
+    }),
     updateStatus: updates.getUpdateStatus,
     checkForUpdates: updates.checkForUpdates,
     installUpdate: () => updates.install(),
@@ -1248,100 +611,34 @@ function registerIpc(): TeamRunner {
   // --- Aya Web (experimental) ---
   registerAyaWebIpc({
     ipcMain,
-    inQueue: inWebQueue,
-    config: async () => (webConfig ??= await loadWebConfig()),
-    save: async (next) => {
-      await saveWebConfig(next);
-      webConfig = next;
-    },
-    apply: applyWebServerState,
-    status: webStatus,
+    inQueue: ayaWeb.inWebQueue,
+    config: ayaWeb.config,
+    save: ayaWeb.save,
+    apply: ayaWeb.applyWebServerState,
+    status: ayaWeb.webStatus,
   });
   return teamRunner;
 }
 
-// Multi-window: every live Aya window, in creation order. `mainWindow` tracks
-// the last-focused live window so second-instance / app:open-file / menu
-// actions have a sensible target when no Aya window has OS focus.
-const ayaWindows = new Set<BrowserWindow>();
-let mainWindow: BrowserWindow | null = null;
-
-/** The window an outside action (menu, CLI open, notification) should hit:
- *  the OS-focused Aya window, else the last-focused live one. */
-function focusedAyaWindow(): BrowserWindow | null {
-  const focused = BrowserWindow.getFocusedWindow();
-  if (focused && ayaWindows.has(focused)) return focused;
-  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-}
-
-/** macOS keeps running with every window closed; outside opens and `activate`
- *  share this, so however they interleave only one window is created. */
-const { createOnce: createWindowOnce, forOpen: windowForOpen } = createWindowSource(focusedAyaWindow, async () => {
-  mainWindow = createWindow(await loadWindowState());
-  return mainWindow;
-}, () => appQuitting);
-
-/** Set once startup has created its own first window. */
-let startupWindowCreated = false;
-
 /** second-instance / open-file: focus the open's window and deliver `dir`; with every window closed a new one is
  *  made, except before startup made its first (that would make two). */
 async function openFromOutside(dir: string | null): Promise<void> {
-  const target = startupWindowCreated ? await windowForOpen() : focusedAyaWindow();
+  const target = windows.startupWindowCreated ? await windowForOpen() : focusedAyaWindow();
   if (target) {
     if (target.isMinimized()) target.restore();
     target.focus();
   }
-  await dispatchOpenProject(target, dir);
+  await dispatchOpenProject({ window: target }, dir);
 }
 
 /** Every window, and Aya Web's clients through a window-like sink (harness status dots must work in the browser too). */
 function statusSinks(): ControlStatusSink[] {
-  const web = { isDestroyed: () => false, webContents: { send: (channel: "control:status", update: unknown) => void webServer?.broadcast(channel, update) } };
+  const web = { isDestroyed: () => false, webContents: { send: (channel: "control:status", update: unknown) => ayaWeb.broadcast(channel, update) } };
   return [...[...ayaWindows].filter((w) => !w.isDestroyed()), web];
 }
 
 function broadcastStatus(update: ControlStatusUpdate): void {
   for (const sink of statusSinks()) sink.webContents.send("control:status", update);
-}
-
-function eachAyaWindow(fn: (win: BrowserWindow) => void): void {
-  for (const win of ayaWindows) {
-    if (!win.isDestroyed()) fn(win);
-  }
-}
-
-// Per-window project slices (multi-window, session-only) - semantics live in
-// window-slices.ts; main only wires window ids and the disk write.
-const windowSlices = new WindowProjectSlices();
-let bootWindowId: number | null = null;
-/** The boot window has been handed the project list: from here a missing project is really not open. */
-let bootProjectsLoaded = false;
-
-function projectStateForWindow(
-  state: ProjectCollectionState,
-  windowId: number,
-): ProjectCollectionState {
-  const slice = windowSlices.stateForWindow(state, windowId, windowId === bootWindowId);
-  if (windowId === bootWindowId) bootProjectsLoaded = true;
-  return slice;
-}
-
-/** A window died: its projects fall out of `open` into recent; their PTYs keep running in the detached host. */
-async function releaseWindowSlices(windowId: number): Promise<void> {
-  const released = windowSlices.release(windowId);
-  if (released.length === 0 || appQuitting) return;
-  try {
-    const disk = await listProjectState();
-    const openUnion = windowSlices.openUnion();
-    const recent = [
-      ...released.filter((s) => !openUnion.includes(s)),
-      ...disk.recent.filter((s) => !released.includes(s)),
-    ];
-    await saveProjectState({ ...disk, open: openUnion, recent });
-  } catch {
-    // best effort - a failed trim only means the projects reopen on restart
-  }
 }
 
 // Triggered when a second `Aya` launch happens while we're already running
@@ -1378,7 +675,7 @@ app.whenReady().then(async () => {
   // Codex gets the brief at launch now; AGENTS.md files earlier versions wrote lose it once.
   void dropCodexBriefSections(AGENT_BRIEF_FILES_FILE);
   // Presets can change on disk without a save through Settings.
-  void syncAntigravityBrief();
+  void syncAntigravityBrief(antigravityBriefDeps);
   // Needs the repaired PATH to see the user's shims; not awaited - it only
   // touches files and nothing below depends on it.
   void healDeadCliShims();
@@ -1453,14 +750,14 @@ app.whenReady().then(async () => {
   await handleStaleHost();
 
   const savedState = await loadWindowState();
-  mainWindow = createWindow(savedState);
-  startupWindowCreated = true;
+  windows.mainWindow = createWindow(savedState);
+  windows.startupWindowCreated = true;
   const teamRunner = registerIpc();
   teamsAtQuit = teamRunner;
-  updates.configureAutoUpdates(mainWindow);
+  updates.configureAutoUpdates(windows.mainWindow);
   // Before checking for a NEW update, surface a PREVIOUS one that silently
   // failed to install and rolled back (#78).
-  void updates.reconcilePendingUpdate(mainWindow);
+  void updates.reconcilePendingUpdate(windows.mainWindow);
   // Live-follow Omarchy theme switches: re-broadcast so the renderer re-skins.
   const stopOmarchyWatch = watchOmarchyTheme(() => {
     eachAyaWindow((win) => win.webContents.send("omarchy:changed"));
@@ -1513,7 +810,7 @@ app.whenReady().then(async () => {
       const target = await windowForOpen();
       if (target.isMinimized()) target.restore();
       target.focus();
-      await dispatchOpenProject(target, directory);
+      await dispatchOpenProject({ window: target }, directory);
     },
   });
   if (!socketProblems.remote) startRemoteServer({
@@ -1528,22 +825,12 @@ app.whenReady().then(async () => {
     // fail on the "already exists" guard.
     createProject: (name, directory) => getOrCreateProject(name, directory),
   });
-  // Aya Web (experimental): start the browser-access server when enabled.
-  // Off the critical path - a bad config or busy port must not block boot;
-  // the failure lands in webServerError and shows up in Settings.
-  void inWebQueue(async () => {
-    // Settings may have loaded or changed the config already; that one stands.
-    if (!webConfig) webConfig = await loadWebConfig();
-    await applyWebServerState();
-  })
-    .catch((err: unknown) => {
-      webServerError = err instanceof Error ? err.message : String(err);
-    });
+  ayaWeb.start();
   installApplicationMenu(applicationMenuDeps);
 
   // The stale-host reconcile ran before the window (see above); the menu did
   // not exist yet, so apply the red "Restart Aya" affordance now if needed.
-  if (staleHostDetected) setStaleMenuIcon(applicationMenuDeps);
+  if (staleHostDetected()) setStaleMenuIcon(applicationMenuDeps);
 
   // Phase-2 legacy sweep, deferred off the startup path: clean up what the
   // registry structurally can't reach - pre-registry stray hosts (no record
@@ -1598,7 +885,7 @@ app.whenReady().then(async () => {
   // Honor an initial directory argument on first launch - the renderer
   // applies the same switch-or-create logic as for second-instance.
   const initialDir = findDirInArgv(process.argv);
-  dispatchOpenProject(mainWindow, initialDir).catch(logOpenFailure(initialDir));
+  dispatchOpenProject({ window: windows.mainWindow }, initialDir).catch(logOpenFailure(initialDir));
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length > 0) return;
@@ -1631,8 +918,7 @@ app.on("before-quit", (event) => {
     clearTimeout(legacySweepTimer);
     legacySweepTimer = null;
   }
-  for (const timer of gpuHealTimers) clearTimeout(timer);
-  gpuHealTimers.clear();
+  gpuDeathHandler.clearHealTimers();
   if (IS_E2E_PTY_SHUTDOWN) {
     void ptyHost.shutdown().catch(() => {
       // Test-only cleanup. Normal app runs intentionally keep PTYs alive.
@@ -1643,34 +929,10 @@ app.on("before-quit", (event) => {
   ptyHost.dispose();
 });
 
-// GPU-helper deaths (#79). The OS can quietly kill the GPU process under memory
-// pressure (jetsam); every GPU-composited surface of the window then goes white
-// until Chromium relaunches it (~1-2s). No renderer code can shorten that
-// window, so we do two things: (1) log the death with its reason so a future
-// white-flash report is correlated instantly instead of via `ps` archaeology
-// (the `reason` field confirms or refutes the memory-pressure theory), and (2)
-// once the replacement GPU process should be up, nudge renderers to re-run
-// their existing WebGL/PTY repair path - belt-and-suspenders over Chromium's
-// own repaint.
 const diagnosticsLog = createPtyLog(DIAGNOSTICS_LOG_FILE);
-// Live heal timers: a burst of deaths must not accumulate them.
-const gpuHealTimers = new Set<NodeJS.Timeout>();
-app.on("child-process-gone", (_event, details) => {
-  if (details.type !== "GPU") return;
-  // Do not log a clean exit (usually shutdown), but DO heal: a graceful
-  // mid-session GPU restart reports clean-exit and still drops WebGL contexts.
-  if (details.reason !== "clean-exit") {
-    diagnosticsLog.append("gpu-process-gone", {
-      reason: details.reason, // killed | crashed | oom | ...
-      exitCode: details.exitCode,
-    });
-  }
-  for (const delay of GPU_HEAL_NUDGE_DELAYS_MS) {
-    const timer = setTimeout(() => {
-      gpuHealTimers.delete(timer);
-      if (appQuitting) return;
-      eachAyaWindow((win) => win.webContents.send("gpu:relaunched"));
-    }, delay);
-    gpuHealTimers.add(timer);
-  }
+const gpuDeathHandler = createGpuDeathHandler({
+  diagnosticsLog,
+  appQuitting: () => appQuitting,
+  eachAyaWindow,
 });
+app.on("child-process-gone", (_event, details) => gpuDeathHandler.childProcessGone(details));
