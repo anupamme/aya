@@ -87,8 +87,8 @@ interface Props {
   ) => Promise<void> | void;
   onImportTheme: () => Promise<Theme | null>;
   /** Restart the detached PTY host (#28). Kills running terminals, so the
-   *  button confirms first. */
-  onRestartPtyHost: () => Promise<void> | void;
+   *  button confirms first. Resolves the reason when the restart did not finish, else null. */
+  onRestartPtyHost: () => Promise<string | null> | void;
   initialTab?: SettingsTab;
 }
 
@@ -601,6 +601,17 @@ export function SettingsModal({
     } finally {
       setDiagnosticsBusy(false);
     }
+  };
+
+  // Aya asks before stopping them (in the main process, which Aya Web reaches too).
+  const stopOtherHosts = async () => {
+    try {
+      await window.aya.stopOtherPtyHosts();
+    } catch (err) {
+      setDiagnosticsError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    await refreshDiagnostics();
   };
 
   const copyDiagnostics = async () => {
@@ -2158,7 +2169,10 @@ export function SettingsModal({
                               "Restart the PTY host? This stops all running terminals; restart each with Shift+Enter.",
                             )
                           ) {
-                            void onRestartPtyHost();
+                            void Promise.resolve(onRestartPtyHost()).then(async (failure) => {
+                              if (diagnostics || failure) await refreshDiagnostics();
+                              if (failure) setDiagnosticsError(failure);
+                            });
                           }
                         }}
                       >
@@ -2195,10 +2209,28 @@ export function SettingsModal({
                   </SettingsRow>
                   {(diagnostics || diagnosticsError) && (
                     <div className="aya-settings-diagnostics">
-                      {diagnosticsError ? (
-                        <div className="aya-settings-errors">{diagnosticsError}</div>
-                      ) : diagnostics ? (
+                      {/* Above the report, not instead of it: after a failed restart the report says what still runs. */}
+                      {diagnosticsError && <div className="aya-settings-errors">{diagnosticsError}</div>}
+                      {diagnostics ? (
                         <>
+                          {diagnostics.ptyHost.warnings.length > 0 && (
+                            <div className="aya-settings-diagnostics-warnings" role="status">
+                              {diagnostics.ptyHost.warnings.map((warning) => (
+                                <div key={warning}>
+                                  <strong>Warning:</strong> {warning}
+                                </div>
+                              ))}
+                              {diagnostics.ptyHost.otherHosts.length > 0 && (
+                                <button
+                                  className="aya-modal-btn"
+                                  type="button"
+                                  onClick={() => void stopOtherHosts()}
+                                >
+                                  Stop other hosts
+                                </button>
+                              )}
+                            </div>
+                          )}
                           <div className="aya-settings-diagnostics-grid">
                             <div>
                               <span>Mode</span>
