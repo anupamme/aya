@@ -28,16 +28,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  createProject,
-  createRemoteProject,
-  getOrCreateProject,
-  expandPath,
-  listProjects,
-  listProjectState,
-  saveProjectState,
-  updateProject,
-} from "./config";
+import { getOrCreateProject, listProjects, listProjectState, saveProjectState } from "./config";
 import { bundledAyaCliPath, bundledDistElectronHelperPath } from "./cli-path";
 import { isShellCommand, withCliFirst } from "./pane-command";
 import { defaultInstallAyaCliPath, renderCliShim } from "./cli-shim";
@@ -76,8 +67,7 @@ import {
   type PaneBriefDeps,
   type RoleRef,
 } from "./pane-brief";
-import { closePane, createSpawnGate } from "./spawn-gate";
-import { oneAtATime } from "./keyed-queue";
+import { createSpawnGate } from "./spawn-gate";
 import {
   appleChat,
   type ChatOptions,
@@ -100,25 +90,7 @@ import { restartStaleHost, updateInstaller } from "./update-quit";
 import { notePathRepaired, presetInstalled } from "./command-probe";
 import type { TeamRunner } from "./team-runner";
 import { startRemoteServer } from "./remote-server";
-import { handleMachinesRequest, machinesDiscover, machinesSetup, machinesUiSetup, machinesStatus } from "./machines";
-import { ayaMachinesDeps } from "./machines-dialog";
-import {
-  createRemoteDirectory,
-  createRemoteProjectOnHost,
-  checkRemoteHealth,
-  listRemotePresets,
-  listRemoteDirectory,
-} from "./remote-client";
-import {
-  getGitChangedFiles,
-  getGitDiff,
-  getGitInfo,
-  getGitRoot,
-  headCommit,
-  listWorktreeStatus,
-  workingTreeState,
-} from "./git";
-import { getGitHubLink, isGitHubCliAvailable } from "./github";
+import { headCommit, workingTreeState } from "./git";
 import {
   AYA_HOME,
   CLI_ADOPTION_FILE,
@@ -128,7 +100,6 @@ import {
   IS_DEV,
   IS_E2E_HEADLESS,
   IS_E2E_PTY_SHUTDOWN,
-  PROJECTS_STATE_DELAY_MS,
   SPAWN_PREP_DELAY_MS,
   PTY_HOST_SOCKET_PATH,
   REMOTE_SOCKET_PATH,
@@ -146,51 +117,19 @@ import {
   cleanShipItCache,
   shouldCleanShipItCache,
 } from "./update-recovery";
-import {
-  readOmarchyStatus,
-  readOmarchyTheme,
-  watchOmarchyTheme,
-} from "./omarchy";
-import { scanHarnesses } from "./harnesses";
+import { watchOmarchyTheme } from "./omarchy";
 import { isInternalNavigationUrl, parseExternalUrl } from "./navigation";
-import { createWorktree, removeWorktree } from "./git";
-import { listPresets, savePresets, type AgentKind } from "./presets";
-import { listSnippets, saveSnippets } from "./snippets";
-import { DEFAULT_CLAUDE_CONFIG_DIR, expandUserPath, readClaudeUsageAccounts } from "./usage";
-import {
-  DEFAULT_CODEX_HOME,
-  codexUsageSources,
-  readCodexUsageAccountsFromSources,
-} from "./usage-codex";
-import { DEFAULT_GROK_HOME, readGrokUsage } from "./usage-grok";
-import {
-  usageHookStatus,
-  installUsageHook,
-  uninstallUsageHook,
-} from "./usage-hook";
-import {
-  refreshStatusHookScript,
-  migrateStatusHookCommand,
-  statusHookStatus,
-  installStatusHook,
-  uninstallStatusHook,
-  type StatusHookStatus,
-} from "./status-hook";
-import {
-  refreshStatusCodexHookScript,
-  statusCodexHookStatus,
-  installStatusCodexHook,
-  uninstallStatusCodexHook,
-  type CodexStatusHookStatus,
-} from "./status-hook-codex";
-import { searchHarnessSessions } from "./harness-search";
-import { listMonitoredSessions } from "./session-monitor";
+import { listPresets, type AgentKind } from "./presets";
+import { expandUserPath } from "./usage";
+import { DEFAULT_CODEX_HOME } from "./usage-codex";
+import { usageHookStatus } from "./usage-hook";
+import { refreshStatusHookScript, migrateStatusHookCommand } from "./status-hook";
+import { refreshStatusCodexHookScript } from "./status-hook-codex";
 import {
   LOCAL_SUMMARY_MAX_LINES,
   normalizeLocalSummaryError,
   SUMMARY_TEXT_MAX_CHARS,
 } from "./local-summary-errors";
-import { readRepoProjectConfig } from "./project-local";
 import { repairProcessPath, resolveLoginShellPath } from "./shell-path";
 import { paneReadText } from "./pane-render";
 import { PTY_HOST_EXIT_WAIT_MS, PtyHostClient, waitForExit } from "./pty-host-client";
@@ -198,38 +137,32 @@ import { homeSocketProblems } from "./socket-path";
 import { PTY_HOST_SCRIPT_NAME } from "./pty-host-staleness";
 import { liveHostRecords, reapStaleHostRecords } from "./pty-host-registry";
 import { gatherHostHealth, probeSocketPid, type HostHealth } from "./pty-host-health";
-import { COMMAND_PROBE_TIMEOUT_MS, HOOK_VIA, PTY_HOST_NOT_CONNECTED, PTY_HOST_UNKNOWN_REQUEST } from "./constants";
+import { COMMAND_PROBE_TIMEOUT_MS, HOOK_VIA } from "./constants";
 import { sweepLegacyAyaProcesses } from "./pty-host-sweep";
-import {
-  requirePositiveInt,
-  requireString,
-  validateSnippetArray,
-  validatePresetArray,
-  validateProjectCollectionState,
-  optionalTrimmed,
-  requireRecord,
-  validateProjectConfig,
-  validateSpawnRequest,
-  validateThemesFile,
-} from "./validation";
+import { requireString } from "./validation";
 import { withSharedDirCommand } from "./agent-session";
 import { loadWindowState, trackWindowState } from "./window-state";
-import { resolveDropTarget, WindowProjectSlices } from "./window-slices";
+import { WindowProjectSlices } from "./window-slices";
 import {
-  generateWebPassword,
   loadWebConfig,
-  normalizeWebHost,
-  normalizeWebPort,
   saveWebConfig,
-  webCredentials,
   webInterfaceAddresses,
   webServerUrls,
   type WebConfig,
 } from "./web-config";
 import { captureIpcHandlers } from "./web-ipc";
+import { registerEnvIpc } from "./ipc/env-ipc";
+import { registerWindowIpc } from "./ipc/window-ipc";
+import { registerSystemIpc } from "./ipc/system-ipc";
+import { registerUsageIpc } from "./ipc/usage-ipc";
+import { registerSettingsIpc } from "./ipc/settings-ipc";
+import { registerRemoteIpc } from "./ipc/remote-ipc";
+import { registerProjectsIpc } from "./ipc/projects-ipc";
+import { registerAyaWebIpc } from "./ipc/aya-web-ipc";
+import { registerPtyIpc } from "./ipc/pty-ipc";
 import { startWebServer, type WebServerHandle } from "./web-server";
 import { parseSummaryResponse, summaryPrompt } from "./summary-prompt";
-import { restartDialog, waitingNotification } from "./native-ui-text";
+import { restartDialog } from "./native-ui-text";
 import type {
   AyaIntelligenceConfig,
   CliStatus,
@@ -253,7 +186,6 @@ const WINDOW_TITLE = IS_DEV ? "Aya Dev" : "Aya";
 // Settings -> Diagnostics.
 const cliAdoption = createCliAdoptionStore(CLI_ADOPTION_FILE);
 // Maximum number of entries returned by path completion
-const MAX_PATH_COMPLETION_ENTRIES = 100;
 // Maximum number of keyboard-navigable projects (Cmd/Ctrl+1..9)
 const MAX_KEYBOARD_PROJECTS = 9;
 // Minimum dimensions of the main application window (px)
@@ -1360,35 +1292,6 @@ function findDirInArgv(argv: readonly string[]): string | null {
   return null;
 }
 
-async function completeDirectoryPath(rawPrefix: string): Promise<string[]> {
-  const raw = rawPrefix || "~/";
-  const normalizedRaw = raw === "~" ? "~/" : raw;
-  const endsWithSlash = normalizedRaw.endsWith("/");
-  const expanded = expandPath(normalizedRaw);
-  const lookupDir = endsWithSlash ? expanded : path.dirname(expanded);
-  const namePrefix = endsWithSlash ? "" : path.basename(expanded);
-  const rawDirPrefix = endsWithSlash
-    ? normalizedRaw
-    : normalizedRaw.slice(0, normalizedRaw.length - namePrefix.length);
-
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = await fs.readdir(lookupDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  return entries
-    .filter((entry) => entry.isDirectory())
-    .filter((entry) => {
-      if (!namePrefix && entry.name.startsWith(".")) return false;
-      return entry.name.startsWith(namePrefix);
-    })
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, MAX_PATH_COMPLETION_ENTRIES)
-    .map((entry) => `${rawDirPrefix}${entry.name}/`);
-}
-
 /** An "open this project" request (another process, or our own argv) for the renderer, which switches to,
  *  creates, or ignores the project. */
 function dispatchOpenProject(
@@ -2233,6 +2136,30 @@ function setStaleMenuIcon(): void {
   }
 }
 
+/** Settings > Diagnostics > PTY host > Restart (and Aya Web): asks, then replaces the host. Throws when cancelled,
+ *  or when the old host did not exit, so the window leaves its panes as they are. */
+async function restartHostFromWindow(): Promise<void> {
+  if (!(await confirmLosingWork("Restarting the PTY host", "Restart"))) throw new Error("restart cancelled");
+  const exited = await ptyHost.restart();
+  // The red dot follows what the host now is: off for a current host, still on if the restart did not take.
+  await hostHealth();
+  if (!exited) {
+    showStaleHost(true);
+    throw new Error(
+      `The old terminal host did not exit within ${PTY_HOST_EXIT_WAIT_MS / 1000} s; its terminals may still run. Settings > Diagnostics lists it, with Stop other hosts.`,
+    );
+  }
+}
+
+/** Settings > Diagnostics > Stop other hosts: hosts Aya does not use and that are not on the socket, re-verified now
+ *  and asked about here, not in the window (Aya Web reaches this too). */
+async function stopOtherHostsFromWindow(): Promise<number[]> {
+  const health = await hostHealth();
+  if (health.otherHosts.length === 0) return [];
+  if (!(await askStopOtherHosts(health.otherHosts.length, "Settings found"))) return [];
+  return stopHosts(health.otherHosts.map((host) => host.pid));
+}
+
 function registerIpc(): TeamRunner {
   // Aya Web reuses these handlers over WebSocket - record every registration
   // (must run before the first ipcMain.handle below).
@@ -2268,10 +2195,8 @@ function registerIpc(): TeamRunner {
     paneHost: teamPaneHost,
     intelligenceChat,
     relaunch: relaunchDeps,
+    answerPaneOpen: (requestId, error) => paneOpens.answer(requestId, error),
   });
-  ipcMain.handle("teams:panes-opened", (_e, requestId: unknown, error: unknown) =>
-    paneOpens.answer(requireString(requestId, "teams:panes-opened.requestId"), error),
-  );
   const prepareSpawn = async (validated: SpawnRequest): Promise<SpawnRequest> => {
     if (SPAWN_PREP_DELAY_MS) await new Promise((done) => setTimeout(done, SPAWN_PREP_DELAY_MS));
     const request = await withSharedDirCommand(validated);
@@ -2297,650 +2222,101 @@ function registerIpc(): TeamRunner {
       .catch(() => {});
     return true;
   };
-  ipcMain.handle("pty:spawn", (_e, req: unknown) => {
-    const validated = validateSpawnRequest(req);
-    return spawnGate.spawn(validated.ptyId, () => prepareSpawn(validated), sendSpawn).then(async (sent) => {
-      // Closed while preparing: the brief files it wrote after the close are no one's.
-      if (sent === undefined && !spawnGate.spawning(validated.ptyId)) await removePaneBrief(AYA_HOME, validated.ptyId).catch(() => {});
-    });
-  });
-  // One write per pane at a time: the Enter that answers a waiting agent asks the host about the screen first, and
-  // the keys typed right after it must not overtake it.
-  const paneWrites = oneAtATime();
-  ipcMain.handle("pty:write", (_e, ptyId: unknown, data: unknown) => {
-    const id = requireString(ptyId, "pty:write.ptyId");
-    const text = requireString(data, "pty:write.data");
-    return paneWrites(id, async () => {
-      await spawnGate.afterSpawn(id);
+  registerPtyIpc({
+    ipcMain,
+    host: ptyHost,
+    gate: spawnGate,
+    prepareSpawn,
+    sendSpawn,
+    forgetBrief: (ptyId) => removePaneBrief(AYA_HOME, ptyId),
+    noteTyping: async (ptyId, text) => {
       // The user's Enter answers a pane that asked for them (aya status waiting): the windows drop the status.
-      const answered = await noteUserAnswer(id, text, () => ptyHost.holdReason(id));
+      const answered = await noteUserAnswer(ptyId, text, () => ptyHost.holdReason(ptyId));
       if (answered) broadcastStatus(answered);
-      return ptyHost.write(id, text);
-    });
-  });
-  ipcMain.handle(
-    "pty:resize",
-    async (_e, ptyId: unknown, cols: unknown, rows: unknown) =>
-      ptyHost.resize(
-        requireString(ptyId, "pty:resize.ptyId"),
-        requirePositiveInt(cols, "pty:resize.cols"),
-        requirePositiveInt(rows, "pty:resize.rows"),
-      ),
-  );
-  ipcMain.handle("pty:confirm-restart", async (_e, ptyId: unknown) => {
-    const id = requireString(ptyId, "pty:confirm-restart.ptyId");
-    const name = (await relaunchDeps.panes([id]))[0]?.name ?? "this pane";
-    return confirmLosingWork(`Restarting ${name}`, "Restart", [id]);
-  });
-  ipcMain.handle("pty:kill", async (_e, ptyId: unknown) => {
-    const id = requireString(ptyId, "pty:kill.ptyId");
-    await removePaneBrief(AYA_HOME, id).catch(() => {});
-    return closePane(spawnGate, id, { hasPane: paneRunning, kill: (ptyId) => ptyHost.kill(ptyId) });
-  });
-  ipcMain.handle("pty:buffer", async (_e, ptyId: unknown) => {
-    try {
-      return await ptyHost.getBuffer(requireString(ptyId, "pty:buffer.ptyId"));
-    } catch (err) {
-      if (
-        err instanceof Error &&
-        [PTY_HOST_UNKNOWN_REQUEST, PTY_HOST_NOT_CONNECTED].some((m) => err.message.includes(m))
-      ) {
-        return "";
-      }
-      throw err;
-    }
-  });
-  // Live cwd of a terminal's process (null when unavailable) - the client
-  // already turns an old host's "unknown request" into null.
-  ipcMain.handle("pty:cwd", async (_e, ptyId: unknown) =>
-    ptyHost.getCwd(requireString(ptyId, "pty:cwd.ptyId")),
-  );
-  ipcMain.handle("pty:search", async (_e, query: unknown) =>
-    ptyHost.search(requireString(query, "pty:search.query")),
-  );
-  ipcMain.handle("harness:search", async (_e, req: unknown) => {
-    if (typeof req !== "object" || req === null) {
-      throw new Error("harness:search: request must be an object");
-    }
-    const r = req as Record<string, unknown>;
-    const agent = requireString(r.agent, "harness:search.agent");
-    if (agent !== "claude" && agent !== "codex") {
-      throw new Error("harness:search.agent must be 'claude' or 'codex'");
-    }
-    return searchHarnessSessions({
-      agent,
-      cwd: requireString(r.cwd, "harness:search.cwd"),
-      configDir:
-        r.configDir === undefined
-          ? undefined
-          : requireString(r.configDir, "harness:search.configDir"),
-      command: r.command === undefined ? undefined : requireString(r.command, "harness:search.command"),
-      query: requireString(r.query, "harness:search.query"),
-    });
-  });
-  ipcMain.handle("pty-host:restart", async () => {
-    // Thrown, not returned: the window then leaves the panes as they are.
-    if (!(await confirmLosingWork("Restarting the PTY host", "Restart"))) throw new Error("restart cancelled");
-    const exited = await ptyHost.restart();
-    // The red dot follows what the host now is: off for a current host, still on if the restart did not take.
-    await hostHealth();
-    if (!exited) {
-      showStaleHost(true);
-      // Thrown, so the window does not mark its panes stopped while their processes may still run.
-      throw new Error(
-        `The old terminal host did not exit within ${PTY_HOST_EXIT_WAIT_MS / 1000} s; its terminals may still run. Settings > Diagnostics lists it, with Stop other hosts.`,
-      );
-    }
-  });
-  // Hosts Aya does not use and that are not on the socket, re-verified now: their terminals show in no window.
-  // Asked here, not in the window: Aya Web reaches this handler too.
-  ipcMain.handle("pty-host:stop-others", async () => {
-    const health = await hostHealth();
-    if (health.otherHosts.length === 0) return [];
-    if (!(await askStopOtherHosts(health.otherHosts.length, "Settings found"))) return [];
-    return stopHosts(health.otherHosts.map((host) => host.pid));
+    },
+    confirmRestartPane: async (ptyId) => {
+      const name = (await relaunchDeps.panes([ptyId]))[0]?.name ?? "this pane";
+      return confirmLosingWork(`Restarting ${name}`, "Restart", [ptyId]);
+    },
+    restartHost: restartHostFromWindow,
+    stopOtherHosts: stopOtherHostsFromWindow,
+    waiting: outstandingWaiting,
   });
 
-  ipcMain.handle("projects:list", async () => listProjects());
-  ipcMain.handle("projects:state", async (e) => {
-    if (PROJECTS_STATE_DELAY_MS) await new Promise((resolve) => setTimeout(resolve, PROJECTS_STATE_DELAY_MS));
-    const state = await listProjectState();
-    const win = senderWindow(e);
-    // Each window sees only its own open-project slice (multi-window). No
-    // window (e.g. remote server path) gets the full on-disk state.
-    return win ? projectStateForWindow(state, win.id) : state;
+  registerProjectsIpc({
+    ipcMain,
+    senderWindow,
+    stateForWindow: projectStateForWindow,
+    mergeSave: (state, windowId, disk) => windowSlices.mergeSave(state, windowId, disk),
   });
-  ipcMain.handle("projects:save-state", async (e, state: unknown) => {
-    const valid = validateProjectCollectionState(state);
-    const win = senderWindow(e);
-    if (!win) return saveProjectState(valid);
-    const disk = await listProjectState().catch(() => null);
-    return saveProjectState(windowSlices.mergeSave(valid, win.id, disk));
-  });
-  // Multi-window: targets for "Move to window…" (every live window but the
-  // caller, labeled by its last-saved active project).
-  ipcMain.handle("windows:list-others", async (e) => {
-    const self = senderWindow(e);
-    return [...ayaWindows]
-      .filter((w) => !w.isDestroyed() && w !== self)
-      .map((w) => ({
-        id: w.id,
-        activeProject: windowSlices.activeProjectOf(w.id),
-      }));
-  });
-  // Adopt a (released) project into another window - the source renderer drops
-  // its local state first (WITHOUT killing PTYs), then calls this; the target
-  // window runs the ordinary switch-or-create open flow and re-attaches to the
-  // live PTYs exactly like after an app restart.
-  // Where would a tab released at this screen point land? Pure hit-test over
-  // the live windows' bounds; the source window wins overlaps (see
-  // resolveDropTarget).
-  ipcMain.handle(
-    "windows:resolve-drop",
-    async (e, x: unknown, y: unknown) => {
-      if (typeof x !== "number" || typeof y !== "number") {
-        throw new Error("windows:resolve-drop: x/y must be numbers");
-      }
-      const self = senderWindow(e);
-      const candidates = [...ayaWindows]
-        .filter((w) => !w.isDestroyed() && w.isVisible())
-        .map((w) => ({ id: w.id, bounds: w.getBounds(), isSelf: w === self }));
-      return resolveDropTarget(x, y, candidates);
-    },
-  );
-  ipcMain.handle(
-    "windows:adopt-project",
-    async (_e, directory: unknown, target: unknown, at: unknown) => {
-      const dir = requireString(directory, "windows:adopt-project.directory");
-      const dropAt =
-        at &&
-        typeof at === "object" &&
-        typeof (at as Record<string, unknown>).x === "number" &&
-        typeof (at as Record<string, unknown>).y === "number"
-          ? (at as { x: number; y: number })
-          : undefined;
-      let win: BrowserWindow | null = null;
-      if (target === "new") {
-        win = await openNewWindow(dropAt);
-      } else if (typeof target === "number") {
-        win =
-          [...ayaWindows].find((w) => w.id === target && !w.isDestroyed()) ??
-          null;
-      }
-      if (!win) throw new Error("windows:adopt-project: target window not found");
-      if (win.isMinimized()) win.restore();
-      win.focus();
-      dispatchOpenProject(win, dir).catch(logOpenFailure(dir));
-    },
-  );
-  ipcMain.on("open-project:done", (event, dir: unknown) => {
-    if (typeof dir === "string") confirmOpen(event.sender, dir);
-  });
-  ipcMain.handle("projects:create", async (_e, name: unknown, dir: unknown) =>
-    createProject(
-      requireString(name, "projects:create.name"),
-      requireString(dir, "projects:create.dir"),
-    ),
-  );
-  ipcMain.handle("projects:create-remote", async (_e, req: unknown) => {
-    if (typeof req !== "object" || req === null || Array.isArray(req)) {
-      throw new Error("projects:create-remote.req must be an object");
-    }
-    const r = req as Record<string, unknown>;
-    return createRemoteProject({
-      name: requireString(r.name, "projects:create-remote.name"),
-      directory: requireString(r.directory, "projects:create-remote.directory"),
-      hostId: requireString(r.hostId, "projects:create-remote.hostId"),
-      label: requireString(r.label, "projects:create-remote.label"),
-      sshTarget: requireString(r.sshTarget, "projects:create-remote.sshTarget"),
-    });
-  });
-  ipcMain.handle(
-    "remote:list-directory",
-    async (_e, sshTarget: unknown, directory: unknown) =>
-      listRemoteDirectory(
-        requireString(sshTarget, "remote:list-directory.sshTarget"),
-        typeof directory === "string" ? directory : undefined,
-      ),
-  );
-  ipcMain.handle(
-    "remote:create-directory",
-    async (_e, sshTarget: unknown, directory: unknown) =>
-      createRemoteDirectory(
-        requireString(sshTarget, "remote:create-directory.sshTarget"),
-        requireString(directory, "remote:create-directory.directory"),
-      ),
-  );
-  ipcMain.handle("remote:list-presets", async (_e, sshTarget: unknown) =>
-    listRemotePresets(requireString(sshTarget, "remote:list-presets.sshTarget")),
-  );
-  ipcMain.handle("remote:health", async (_e, sshTarget: unknown) =>
-    checkRemoteHealth(requireString(sshTarget, "remote:health.sshTarget")),
-  );
-  // The status bar and Settings > Machines: the same functions `aya machines` runs. A click in Aya is the user's
-  // own yes, so these adds, removes and backend changes ask no dialog; an agent's `aya machines add`, `remove` and `configure` do.
-  const machinesDeps = { ...ayaMachinesDeps(AYA_HOME, os.homedir(), () => null, () => listProjects()), confirmAdd: async () => true, confirmRemove: async () => true, confirmConfigure: async () => true };
-  ipcMain.handle("machines:status", () => machinesStatus(machinesDeps));
-  ipcMain.handle("machines:setup", (e) => e.sender ? machinesUiSetup(machinesDeps) : machinesSetup(machinesDeps));
-  ipcMain.handle("machines:discover", (_e, id: unknown) => machinesDiscover(requireString(id, "machines:discover.id"), machinesDeps));
-  ipcMain.handle("machines:configure", async (_e, argv: unknown, token: unknown) => {
-    if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string") || argv[0] !== "configure" || (token !== undefined && typeof token !== "string")) {
-      throw new Error("machines:configure needs configuration arguments and optional token input");
-    }
-    return (await handleMachinesRequest({ argv, ...(typeof token === "string" ? { token } : {}) }, machinesDeps)).output;
-  });
-  ipcMain.handle("machines:command", async (_e, argv: unknown) => {
-    if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string") || !["add", "remove", "claim", "release"].includes(argv[0])) {
-      throw new Error("machines:command takes add, remove, claim or release with text arguments");
-    }
-    return (await handleMachinesRequest({ argv, user: os.userInfo().username }, machinesDeps)).output;
-  });
-  ipcMain.handle(
-    "remote:create-project",
-    async (_e, sshTarget: unknown, directory: unknown, name: unknown) =>
-      createRemoteProjectOnHost(
-        requireString(sshTarget, "remote:create-project.sshTarget"),
-        requireString(directory, "remote:create-project.directory"),
-        typeof name === "string" ? name : undefined,
-      ),
-  );
-  ipcMain.handle("projects:update", async (_e, project: unknown) =>
-    updateProject(validateProjectConfig(project)),
-  );
-  ipcMain.handle("projects:read-repo-config", async (_e, dir: unknown) =>
-    readRepoProjectConfig(requireString(dir, "projects:read-repo-config.dir")),
-  );
-
-  ipcMain.handle("presets:list", async () => listPresets());
-  ipcMain.handle("agent:waiting", () => outstandingWaiting());
+  registerRemoteIpc({ ipcMain, ayaHome: AYA_HOME });
   // A question from before the restart that the pane's session no longer confirms: the windows mark it.
   onStatusPushed(broadcastStatus);
-  ipcMain.handle("presets:save", async (_e, presets: unknown) => {
-    await savePresets(validatePresetArray(presets));
-    await syncAntigravityBrief();
-  });
-  ipcMain.handle("presets:scan-harnesses", async () => scanHarnesses());
-
-  ipcMain.handle("snippets:list", async () => listSnippets());
-  ipcMain.handle("snippets:save", async (_e, snippets: unknown) =>
-    saveSnippets(validateSnippetArray(snippets)),
-  );
-  ipcMain.handle("local-summary:summarize", async (_e, req: unknown) =>
-    summarizeLocal(validateLocalSummaryRequest(req)),
-  );
-  // Read-only: the account-wide usage snapshot a user hook writes (no fetch).
-  ipcMain.handle("usage:get", async () => {
-    const presets = await listPresets();
-    return readClaudeUsageAccounts(
-      presets
-        .filter((p) => p.agent === "claude")
-        .map((p) => ({
-          id: p.id,
-          label: p.name,
-          configDir: p.configDir || DEFAULT_CLAUDE_CONFIG_DIR,
-        })),
-    );
-  });
-  // Read-only: Codex usage, parsed from its own local rollout logs (Codex
-  // writes its rate-limit % there, so no token/endpoint/hook is needed).
-  ipcMain.handle("usage:get-codex", async () => {
-    return readCodexUsageAccountsFromSources(codexUsageSources(await listPresets()));
-  });
-  // Read-only: 7-day spend and tokens, plus the weekly limit when Grok logged one.
-  ipcMain.handle("usage:get-grok", async () => {
-    const presets = await listPresets();
-    const grokDirs = presets
-      .filter((p) => p.agent === "grok" && p.configDir)
-      .map((p) => expandUserPath(p.configDir as string));
-    return readGrokUsage(grokDirs.length > 0 ? grokDirs : [DEFAULT_GROK_HOME]);
-  });
-  // Optional, user-enabled usage hook installer (writes ~/.claude/settings.json
-  // + a fetch script). The Aya process never reads a token or calls the
-  // endpoint - that happens later in the script, run by Claude Code.
-  ipcMain.handle("usage-hook:status", async () => usageHookStatus());
-  ipcMain.handle("usage-hook:install", async () => installUsageHook());
-  ipcMain.handle("usage-hook:uninstall", async () => uninstallUsageHook());
-  // Automatic agent status (#38): Claude Code lifecycle hooks -> `aya status`.
-  // Writes to ~/.claude/settings.json; the generated script no-ops outside Aya.
-  // Automatic status (#38) covers both agents under one toggle: the Claude
-  // settings.json hooks and the Codex notify program. `installed` stays
-  // Claude-driven (unchanged contract); Codex rides along as a sub-status so
-  // the UI can disclose it (including the "you already have a notify" case).
-  const codexSub = (c: CodexStatusHookStatus): StatusHookStatus["codex"] => ({
-    configured: c.configured,
-    conflict: c.conflict,
-    configPath: c.configPath,
-  });
-  ipcMain.handle("status-hook:status", async () => {
-    const [claude, codex] = await Promise.all([
-      statusHookStatus(),
-      statusCodexHookStatus(),
-    ]);
-    return { ...claude, codex: codexSub(codex) };
-  });
-  ipcMain.handle("status-hook:install", async () => {
-    const [claude, codex] = await Promise.all([
-      installStatusHook(),
-      installStatusCodexHook(),
-    ]);
-    return { ...claude, codex: codexSub(codex) };
-  });
-  ipcMain.handle("status-hook:uninstall", async () => {
-    const [claude, codex] = await Promise.all([
-      uninstallStatusHook(),
-      uninstallStatusCodexHook(),
-    ]);
-    return { ...claude, codex: codexSub(codex) };
-  });
-  // Omarchy theme integration (Linux): the renderer skins chrome + terminal from
-  // the current Omarchy palette, and the watcher below pushes live switches.
-  ipcMain.handle("omarchy:status", async () => readOmarchyStatus());
-  ipcMain.handle("omarchy:read", async () => readOmarchyTheme());
-  ipcMain.handle("sessions:list-monitored", async () => listMonitoredSessions());
-  ipcMain.handle("intelligence:ollama-status", async (_e, model: unknown) =>
-    ollamaStatus(typeof model === "string" && model.trim() ? model.trim() : undefined),
-  );
-  ipcMain.handle("intelligence:pull-ollama-model", async (_e, model: unknown) =>
-    pullOllamaModel(validateOllamaModelName(model)),
-  );
-
-  ipcMain.handle("themes:list", async () => {
-    const { loadThemes } = await import("./themes");
-    return loadThemes();
-  });
-  ipcMain.handle("themes:save", async (_e, file: unknown) => {
-    const { saveThemes } = await import("./themes");
-    return saveThemes(validateThemesFile(file));
-  });
-  ipcMain.handle("themes:import", async (e) => {
-    const { parseTheme } = await import("./themes");
-    const win = senderWindow(e);
-    const options = {
-      title: "Import terminal theme",
-      defaultPath: app.getPath("home"),
-      properties: ["openFile" as const],
-      filters: [
-        {
-          name: "Terminal themes (.itermcolors, .json)",
-          extensions: ["itermcolors", "json"],
-        },
-        { name: "iTerm2 colors", extensions: ["itermcolors"] },
-        { name: "Windows Terminal JSON", extensions: ["json"] },
-        { name: "All files", extensions: ["*"] },
-      ],
-    };
-    const result = win
-      ? await dialog.showOpenDialog(win, options)
-      : await dialog.showOpenDialog(options);
-    if (result.canceled || result.filePaths.length === 0) return null;
-    const filePath = result.filePaths[0];
-    const content = await fs.readFile(filePath, "utf-8");
-    const fallbackName = path.basename(filePath, path.extname(filePath));
-    return parseTheme(content, fallbackName);
+  registerUsageIpc(ipcMain);
+  registerSettingsIpc({
+    ipcMain,
+    senderWindow,
+    dialog,
+    home: () => app.getPath("home"),
+    presetsSaved: syncAntigravityBrief,
+    intelligence: {
+      summarize: (req) => summarizeLocal(validateLocalSummaryRequest(req)),
+      ollamaStatus: (model) => ollamaStatus(model),
+      pullOllamaModel: (model) => pullOllamaModel(validateOllamaModelName(model)),
+    },
   });
 
-  ipcMain.handle("env:cwd", async () => process.cwd());
-  ipcMain.handle("env:home", async () => os.homedir());
-  ipcMain.handle("env:expand", async (_e, p: unknown) =>
-    expandPath(requireString(p, "env:expand.path")),
-  );
-  ipcMain.handle("env:complete-path", async (_e, p: unknown) =>
-    completeDirectoryPath(requireString(p, "env:complete-path.path")),
-  );
-  ipcMain.handle("env:git", async (_e, directory: unknown) =>
-    getGitInfo(requireString(directory, "env:git.directory")),
-  );
-  ipcMain.handle("env:git-changed-files", async (_e, directory: unknown) =>
-    getGitChangedFiles(requireString(directory, "env:git-changed-files.directory")),
-  );
-  ipcMain.handle("env:git-diff", async (_e, directory: unknown) =>
-    getGitDiff(requireString(directory, "env:git-diff.directory")),
-  );
-  ipcMain.handle("env:git-root", async (_e, directory: unknown) =>
-    getGitRoot(requireString(directory, "env:git-root.directory")),
-  );
-  ipcMain.handle("env:git-worktree-status", async (_e, directory: unknown) =>
-    listWorktreeStatus(requireString(directory, "env:git-worktree-status.directory")),
-  );
-  ipcMain.handle("env:github-link", async (_e, directory: unknown) =>
-    getGitHubLink(requireString(directory, "env:github-link.directory")),
-  );
-  ipcMain.handle("env:git-worktree-add", async (_e, req: unknown) => {
-    const r = requireRecord(req, "env:git-worktree-add");
-    return createWorktree(
-      requireString(r.directory, "env:git-worktree-add.directory"),
-      requireString(r.path, "env:git-worktree-add.path"),
-      optionalTrimmed(r.branch),
-      optionalTrimmed(r.base),
-    );
+  registerWindowIpc({
+    ipcMain,
+    senderWindow,
+    windows: () => ayaWindows,
+    activeProjectOf: (id) => windowSlices.activeProjectOf(id),
+    openNewWindow,
+    openProjectIn: (win, dir) => void dispatchOpenProject(win, dir).catch(logOpenFailure(dir)),
+    confirmOpen,
+    isFullScreen: isAyaFullScreen,
+    setFullScreen: setAyaFullScreen,
   });
-  ipcMain.handle("env:git-worktree-remove", async (_e, req: unknown) => {
-    const r = requireRecord(req, "env:git-worktree-remove");
-    return removeWorktree(
-      requireString(r.directory, "env:git-worktree-remove.directory"),
-      requireString(r.path, "env:git-worktree-remove.path"),
-      r.force === true,
-    );
+  registerEnvIpc({
+    ipcMain,
+    senderWindow,
+    dialog,
+    shell,
+    clipboard,
+    home: () => app.getPath("home"),
+    openExternalUrl,
   });
-  ipcMain.handle("env:github-cli-available", async () =>
-    isGitHubCliAvailable(),
-  );
-  ipcMain.handle("env:pick-dir", async (e) => {
-    const win = senderWindow(e);
-    const options = {
-      title: "Pick a project directory",
-      defaultPath: app.getPath("home"),
-      properties: ["openDirectory" as const, "createDirectory" as const],
-    };
-    const result = win
-      ? await dialog.showOpenDialog(win, options)
-      : await dialog.showOpenDialog(options);
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return result.filePaths[0];
-  });
-  ipcMain.handle("env:pick-sound", async (e) => {
-    const win = senderWindow(e);
-    const options = {
-      title: "Pick a notification sound",
-      properties: ["openFile" as const],
-      filters: [
-        { name: "Audio", extensions: ["wav", "mp3", "ogg", "m4a", "aac", "flac"] },
-        { name: "All files", extensions: ["*"] },
-      ],
-    };
-    const result = win
-      ? await dialog.showOpenDialog(win, options)
-      : await dialog.showOpenDialog(options);
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return result.filePaths[0];
-  });
-  ipcMain.handle("env:dir-exists", async (_e, p: unknown) => {
-    try {
-      const stat = await fs.stat(
-        expandPath(requireString(p, "env:dir-exists.path")),
-      );
-      return stat.isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  ipcMain.handle("env:create-dir", async (_e, p: unknown) => {
-    await fs.mkdir(expandPath(requireString(p, "env:create-dir.path")), {
-      recursive: true,
-    });
-  });
-  ipcMain.handle("env:open-path", async (_e, p: unknown) => {
-    const expanded = expandPath(requireString(p, "env:open-path.path"));
-    const error = await shell.openPath(expanded);
-    if (error) throw new Error(error);
-  });
-  ipcMain.handle("env:open-url", async (_e, value: unknown) => {
-    await openExternalUrl(requireString(value, "env:open-url.url"));
-  });
-  ipcMain.handle("env:clipboard-read", async () => clipboard.readText());
-  ipcMain.handle("env:clipboard-write", async (_e, value: unknown) => {
-    clipboard.writeText(requireString(value, "env:clipboard-write.text"));
-  });
-  ipcMain.handle("app:is-fullscreen", async (e) => {
-    const win = senderWindow(e);
-    return win ? isAyaFullScreen(win) : false;
-  });
-  ipcMain.handle("app:is-maximized", async (e) => {
-    const win = senderWindow(e);
-    return win ? win.isMaximized() : false;
-  });
-  ipcMain.handle("app:minimize", (e) => {
-    const win = senderWindow(e);
-    if (win && !win.isDestroyed()) win.minimize();
-  });
-  ipcMain.handle("app:toggle-maximize", (e) => {
-    const win = senderWindow(e);
-    if (!win || win.isDestroyed()) return;
-    if (win.isMaximized()) win.unmaximize();
-    else win.maximize();
-  });
-  ipcMain.handle("app:close", (e) => {
-    const win = senderWindow(e);
-    if (win && !win.isDestroyed()) win.close();
-  });
-  ipcMain.handle("app:set-fullscreen", async (e, value: unknown) => {
-    const win = senderWindow(e);
-    if (win) setAyaFullScreen(win, !!value);
-  });
-  ipcMain.handle("app:notify-waiting", async (e, req: unknown) => {
-    if (!Notification.isSupported()) return;
-    // The notifying renderer owns the terminal - clicking the notification
-    // must focus THAT window, which may not exist anymore by click time.
-    const win = senderWindow(e);
-    const projectSlug = requireString(
-      (req as Record<string, unknown> | null)?.projectSlug,
-      "app:notify-waiting.projectSlug",
-    );
-    const terminalId = requireString(
-      (req as Record<string, unknown> | null)?.terminalId,
-      "app:notify-waiting.terminalId",
-    );
-    const body = requireString(
-      (req as Record<string, unknown> | null)?.body,
-      "app:notify-waiting.body",
-    );
-    const notification = new Notification(waitingNotification(body));
-    notification.on("click", () => {
-      if (!win || win.isDestroyed()) return;
-      if (win.isMinimized()) win.restore();
-      win.focus();
-      win.webContents.send("notification:select-terminal", {
-        projectSlug,
-        terminalId,
-      });
-    });
-    notification.show();
-  });
-  ipcMain.handle("app:cli-status", async () => cliStatus());
-  ipcMain.handle("app:install-cli", async () => installCli());
-  ipcMain.handle("app:diagnostics", async () => diagnosticsReport());
-  // The window's error screen reloads through here: a location.reload() from the page started and
-  // was cancelled (measured in e2e, Electron 43), while webContents.reload() is not. Aya Web reloads
-  // in its own page, so a stub event (sender: null) is a no-op.
-  ipcMain.handle("window:reload", (e) => {
-    e.sender?.reload();
-  });
-  ipcMain.handle("updates:status", async () => getUpdateStatus());
-  ipcMain.handle("updates:check", async () => checkForUpdates());
-  ipcMain.handle("updates:install", () => updates.install());
-  ipcMain.handle("app:open-notification-settings", async () => {
-    if (process.platform === "darwin") {
-      await shell.openExternal(
-        "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
-      );
-    }
-  });
-  ipcMain.handle("app:open-local-network-settings", async () => {
-    if (process.platform === "darwin") {
-      // The Local Network anchor is unreliable on macOS 26. Open the parent pane; the UI names the next step.
-      await shell.openExternal("x-apple.systempreferences:com.apple.preference.security");
-    }
-  });
-  // Microphone access surfaced read-only in Settings: Aya never records, but
-  // CLI tools the user runs (e.g. a /voice plugin) may. macOS owns the actual
-  // grant/revoke; these just report status, trigger the system prompt, and
-  // deep-link to the real toggle. See build/entitlements.mac.plist (audio-input).
-  ipcMain.handle("mic:status", async () => {
-    if (process.platform !== "darwin") return "unsupported";
-    return systemPreferences.getMediaAccessStatus("microphone");
-  });
-  ipcMain.handle("mic:request", async () => {
-    if (process.platform !== "darwin") return true;
-    // No-op (returns immediately) if already granted/denied; only prompts when
-    // status is not-determined.
-    return systemPreferences.askForMediaAccess("microphone");
-  });
-  ipcMain.handle("mic:open-settings", async () => {
-    if (process.platform === "darwin") {
-      await shell.openExternal(
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
-      );
-    }
-  });
-  // Dock badge for unattended notifications (waiting terminals). Empty
-  // string clears. macOS only; no-op on Linux/Windows for now since their
-  // taskbar badge stories differ.
-  ipcMain.handle("app:set-dock-badge", async (_e, text: unknown) => {
-    const badge = requireString(text, "app:set-dock-badge.text");
-    if (process.platform === "darwin" && app.dock) {
-      try {
-        app.dock.setBadge(badge || "");
-      } catch {
-        // best effort
-      }
-    }
+  registerSystemIpc({
+    ipcMain,
+    senderWindow,
+    platform: process.platform,
+    notifications: {
+      isSupported: () => Notification.isSupported(),
+      create: (options) => new Notification(options),
+    },
+    shell,
+    systemPreferences,
+    dock: app.dock,
+    cliStatus,
+    installCli,
+    diagnosticsReport,
+    updateStatus: getUpdateStatus,
+    checkForUpdates,
+    installUpdate: () => updates.install(),
   });
 
   // --- Aya Web (experimental) ---
-  ipcMain.handle("web:status", () =>
-    inWebQueue(async () => {
-      if (!webConfig) webConfig = await loadWebConfig();
-      return webStatus();
-    }),
-  );
-  ipcMain.handle("web:configure", (_e, req: unknown) => inWebQueue(async () => {
-    if (typeof req !== "object" || req === null) {
-      throw new Error("web:configure: request must be an object");
-    }
-    if (!webConfig) webConfig = await loadWebConfig();
-    const r = req as Record<string, unknown>;
-    const next: WebConfig = { ...webConfig };
-    if (typeof r.enabled === "boolean") next.enabled = r.enabled;
-    if (r.port !== undefined) next.port = normalizeWebPort(r.port);
-    if (r.host !== undefined) {
-      const host = normalizeWebHost(r.host);
-      if (!host) throw new Error("web:configure: host must be an IP address");
-      next.host = host;
-    }
-    if (typeof r.user === "string" && r.user.trim()) {
-      next.user = r.user.trim();
-    }
-    if (typeof r.password === "string" && r.password) {
-      // Custom password: store only the hash; the plaintext generated copy
-      // (if any) is dropped by webCredentials.
-      delete next.generatedPassword;
-      Object.assign(next, webCredentials(r.password, false));
-    }
-    // Saved first: a failed write leaves Aya on the config it serves now, not on one that is neither saved nor
-    // served.
-    await saveWebConfig(next);
-    webConfig = next;
-    await applyWebServerState();
-    return webStatus();
-  }));
-  ipcMain.handle("web:regenerate-password", () => inWebQueue(async () => {
-    if (!webConfig) webConfig = await loadWebConfig();
-    const next = { ...webConfig, ...webCredentials(generateWebPassword(), true) };
-    await saveWebConfig(next);
-    webConfig = next;
-    // Existing sessions stay valid; new logins need the new password.
-    return webStatus();
-  }));
+  registerAyaWebIpc({
+    ipcMain,
+    inQueue: inWebQueue,
+    config: async () => (webConfig ??= await loadWebConfig()),
+    save: async (next) => {
+      await saveWebConfig(next);
+      webConfig = next;
+    },
+    apply: applyWebServerState,
+    status: webStatus,
+  });
   return teamRunner;
 }
 
