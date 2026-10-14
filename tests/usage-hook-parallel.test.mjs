@@ -122,3 +122,35 @@ test("a failed fetch leaves no scratch file behind", { skip }, async () => {
     rmSync(e.home, { recursive: true, force: true });
   }
 });
+
+// GNU cp fails when its source is replaced while it copies, as another hook's mv onto the shared account file does
+// (CI on #220: "cp: skipping file ..., as it was replaced while being copied"). This stand-in cp does that to the
+// shared file every time, so a hook that copies from it fails on any machine, not only when the timing lines up.
+test("the default account's copy never comes from the shared file another hook may be replacing", { skip }, async () => {
+  const e = setup({ initial: false, throttled: false });
+  writeFileSync(
+    join(e.bin, "cp"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  */usage-claude-*.json)",
+      `    printf '{"other":true}' > "$1.other" && mv "$1.other" "$1"`,
+      `    echo "cp: skipping file '$1', as it was replaced while being copied" >&2`,
+      "    exit 1 ;;",
+      "esac",
+      'exec /bin/cp "$@"',
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(e.bin, "cp"), 0o755);
+  try {
+    const r = await run("/bin/bash", e);
+    assert.equal(r.code, 0, `hook failed: ${r.err}`);
+    const doc = JSON.parse(readFileSync(e.account, "utf8"));
+    assert.equal(doc.fiveHour.pct, 12);
+    assert.deepEqual(JSON.parse(readFileSync(e.out, "utf8")), doc);
+    assert.deepEqual(readdirSync(e.aya).filter((f) => f.endsWith(".tmp")), []);
+  } finally {
+    rmSync(e.home, { recursive: true, force: true });
+  }
+});
