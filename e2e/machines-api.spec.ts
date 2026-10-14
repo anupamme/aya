@@ -256,5 +256,14 @@ test.describe("a save that takes a while", () => {
     for (const field of fields) await expect(field).toBeDisabled();
     await expect(panel.locator(".aya-modal-hint code")).toHaveText("held••••••••", { timeout: 10_000 });
     for (const field of fields) await expect(field).toBeEnabled();
+
+    // Ollama's port, the field the other backend shows.
+    await panel.getByRole("combobox", { name: "Backend for darwine" }).selectOption("ollama");
+    const port = panel.getByLabel("Ollama port");
+    await port.fill("11435");
+    await panel.getByRole("button", { name: "Save backend" }).click();
+    await expect(port).toBeDisabled();
+    await expect(port).toBeEnabled({ timeout: 10_000 });
+    await expect(port).toHaveValue("11435");
   });
 });
