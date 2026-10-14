@@ -54,6 +54,8 @@ test("API settings keep credentials private; a served model stays visible with u
     await again.getByRole("textbox", { name: "API URL for darwine" }).fill(`${url}/other`);
     await expect(again.getByLabel("Bearer token for darwine")).toHaveValue("");
     await again.getByRole("button", { name: "Save backend" }).click();
+    // The hint reads so as soon as the URL differs; the save is done when its answer shows.
+    await expect(again.getByRole("status")).toHaveText("darwine configured: OpenAI-compatible API");
     await expect(again).toContainText("No token saved for this URL.");
     expect(JSON.parse(readFileSync(join(seeded.ayaHome, "machines-auth.json"), "utf8")).entries).toEqual([]);
     await window.keyboard.press("Escape");
