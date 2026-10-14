@@ -1,5 +1,6 @@
 // A pane opened for a team role is launched in a mode that reaches Aya, and the
-// host says how each live pane was launched. HOME, SHELL and PATH are fake.
+// host says how each live pane was launched. HOME, SHELL and PATH are fake, and
+// CODEX_HOME is unset.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,6 +24,8 @@ process.env.AYA_HOME = join(root, "aya-home");
 process.env.HOME = join(root, "home");
 process.env.PATH = "/usr/bin:/bin";
 process.env.SHELL = "/bin/sh";
+// A runner started from a Codex pane has one: Codex's config would be read there, not in this fake home.
+delete process.env.CODEX_HOME;
 mkdirSync(process.env.HOME);
 writeFileSync(join(process.env.HOME, ".profile"), `PATH='${bin}':$PATH\nexport PATH\n`);
 
