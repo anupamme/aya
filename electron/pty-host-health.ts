@@ -179,7 +179,7 @@ export function createPtyHostHealth(deps: PtyHostHealthDeps) {
   // Aya menu item reads this flag so it can kill the stale host before relaunching.
   let staleHostDetected = false;
 
-  /** On launch, reap a stale PTY host (#28) even with live terminals, asking first when a pane shows background work
+  /** On launch, reap a stale PTY host (#28) even with live terminals, asking first when that stops work in a pane
    *  (a no keeps it, with Restart Aya's red dot). Best-effort; a pre-#73 host may orphan a signal-ignoring child once. */
   async function handleStaleHost(): Promise<void> {
     try {
@@ -200,7 +200,7 @@ export function createPtyHostHealth(deps: PtyHostHealthDeps) {
         health = await hostHealth();
       }
       if (!health.stale) return;
-      // The update is in, but the panes' background work still runs on the old host: ask, unless Restart to update did.
+      // The update is in, but the panes' work still runs on the old host: ask, unless Restart to update did.
       let exited = true;
       if (
         !(await restartStaleHost(relaunchDeps, (text) => askRestart("Restart terminals", text), async () => {

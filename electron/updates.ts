@@ -265,7 +265,7 @@ export function createUpdates(deps: UpdatesDeps) {
     return updateCheckInFlight;
   }
 
-  /** Restart to update (asks before stopping background work) and an ordinary quit's update (installs only past no
+  /** Restart to update (asks before stopping work in panes) and an ordinary quit's update (installs only past no
    *  background work, else leaves it for Restart to update). Markers are written for diagnoseRelaunch (#78). */
   const updates = updateInstaller({
     status: getUpdateStatus,
@@ -309,7 +309,7 @@ export async function ordinaryQuitInstalls(deps: RelaunchDeps, downloaded: boole
 export interface UpdateInstallDeps {
   status: () => { phase: string; downloadedVersion?: string | null };
   relaunch: RelaunchDeps;
-  /** The native question before Restart to update stops background work. */
+  /** The native question before Restart to update stops work in panes. */
   ask: (text: string) => Promise<boolean>;
   /** Set from the handoff until the quit (#78); the updater's error event releases it. */
   latch: { installing: boolean };
@@ -375,7 +375,7 @@ export function updateInstaller(deps: UpdateInstallDeps) {
   return { install, beforeQuit };
 }
 
-/** On launch with a stale host: restarts it unless a pane shows background work the user did not agree to stop and
+/** On launch with a stale host: restarts it unless that stops work in a pane the user did not agree to stop and
  *  keeps now; true when restarted. An old host whose panes cannot be read is restarted, as before the question. */
 export async function restartStaleHost(deps: RelaunchDeps, ask: (text: string) => Promise<boolean>, restart: () => Promise<unknown>): Promise<boolean> {
   if (!(await confirmRestartOnce(deps, "Restarting the terminals for the new Aya version", ask).catch(() => true))) return false;

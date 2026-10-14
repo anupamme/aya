@@ -56,6 +56,7 @@ import { userShell } from "./shell";
 import { registerTeamIpc } from "./ipc/team-ipc";
 import { askWindowToOpenPanes, newPaneId, RendererRequests, paneAliveOf, presetAgent, teamPaneDeps, type PaneHost } from "./team-panes";
 import { confirmRestart, type RelaunchDeps } from "./relaunch-notes";
+import { foregroundCommand } from "./foreground-command";
 import { createUpdates, UPDATE_AUTO_CHECK_DELAY_MS } from "./updates";
 import { notePathRepaired, presetInstalled } from "./command-probe";
 import type { TeamRunner } from "./team-runner";
@@ -190,7 +191,7 @@ async function paneAgent(terminalId: string): Promise<AgentKind | undefined> {
   const preset = tab && (await listPresets()).find((p) => p.id === tab.presetId);
   return preset ? presetAgent(preset) : undefined;
 }
-// Restarts that stop the panes' background tasks and monitors warn first, and the resumed team agents are told.
+// Restarts that stop a turn, a shell's command or background tasks warn first, and the resumed team agents are told.
 const relaunchDeps: RelaunchDeps = {
   file: path.join(AYA_HOME, "relaunch-notes.json"),
   panes: async (ids) => (await listProjects()).flatMap((p) => p.tabs).filter((t) => !ids || ids.includes(t.id)).map(({ id, name }) => ({ id, name })),
@@ -201,8 +202,13 @@ const relaunchDeps: RelaunchDeps = {
     const launch = await ptyHost.launch(terminalId);
     return typeof launch === "object" && launch !== null ? launch.command : null;
   },
+  busy: (terminalId) => ptyHost.paneBusy(terminalId),
+  foreground: async (terminalId) => {
+    const pid = await ptyHost.getPid(terminalId);
+    return typeof pid === "number" ? foregroundCommand(pid) : null;
+  },
 };
-/** A native yes/no before a restart that stops background work; `yes` names the restart. */
+/** A native yes/no before a restart that stops work in panes; `yes` names the restart. */
 async function askRestart(yes: string, text: string): Promise<boolean> {
   const options = restartDialog(yes, text);
   const parent = focusedAyaWindow();

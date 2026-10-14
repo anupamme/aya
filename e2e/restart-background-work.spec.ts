@@ -46,7 +46,7 @@ test("Restart terminal asks when the pane shows background work, and the resumed
   const before = read("tab-right");
   await restart(window, "shell 2");
   await expect.poll(() => asked(app)).toHaveLength(1);
-  expect((await asked(app))[0]).toMatch(/^Restarting shell 2 stops what these panes run in the background \(shell 2: 2 shells, 1 monitor\)/);
+  expect((await asked(app))[0]).toMatch(/^Restarting shell 2 stops what these panes are doing \(shell 2: 2 shells, 1 monitor\)\. An agent cannot carry its background tasks/);
   await window.waitForTimeout(1_500);
   expect(read("tab-right")).toBe(before);
 
