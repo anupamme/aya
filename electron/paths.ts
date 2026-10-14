@@ -22,6 +22,8 @@ export const IS_E2E_HEADLESS = process.env.AYA_E2E_HEADLESS === "1";
 export const IS_E2E_PTY_SHUTDOWN = process.env.AYA_E2E_PTY_SHUTDOWN === "1";
 /** E2E only: how long the boot window waits for its project list, to hold the gap where the socket is up and no project is restored. */
 export const PROJECTS_STATE_DELAY_MS = Number(process.env.AYA_E2E_PROJECTS_STATE_DELAY_MS) || 0;
+/** E2E only: how long Settings > Machines' Save backend waits in main before it saves, to hold the form mid-save. */
+export const MACHINES_CONFIGURE_DELAY_MS = Number(process.env.AYA_E2E_MACHINES_CONFIGURE_DELAY_MS) || 0;
 /** E2E only: how long main prepares every pane spawn (brief, lookups) before the host hears of it. */
 export const SPAWN_PREP_DELAY_MS = Number(process.env.AYA_E2E_SPAWN_PREP_DELAY_MS) || 0;
 /** E2E only: how long a team cadence "minute" lasts, so a round test need not wait a real one. */

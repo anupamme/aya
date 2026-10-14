@@ -5,9 +5,10 @@ import { expect } from "@playwright/test";
 import { test } from "./fixtures";
 import { seedBase, openMachinesSettings } from "./helpers/machines";
 
-test.use({ seedOptions: { ...seedBase, homeFiles: { ".ssh/config": "Host darwine\n" }, ayaHomeFiles: {
+const SEED = { ...seedBase, homeFiles: { ".ssh/config": "Host darwine\n" }, ayaHomeFiles: {
   "machines.json": JSON.stringify({ version: 1, machines: [{ id: "darwine", reach: { ssh: "darwine" }, ollama: { port: 11434 } }] }),
-} } });
+} };
+test.use({ seedOptions: SEED });
 
 test("API settings keep credentials private; a served model stays visible with unavailable GPU telemetry", async ({ app, window, seeded }) => {
   const token = "e2e-fixture-token";
@@ -235,4 +236,25 @@ test("the machines popover refreshes when Aya's window regains focus", async ({ 
       await expect(popover).toContainText("second-model · served by API", { timeout: 500 });
     }).toPass({ timeout: 10_000 });
   } finally { api.closeAllConnections(); await new Promise<void>((r) => api.close(() => r())); }
+});
+
+test.describe("a save that takes a while", () => {
+  // Save backend waits this long in main: the form stays mid-save for the checks.
+  test.use({ seedOptions: { ...SEED, launchEnv: { AYA_E2E_MACHINES_CONFIGURE_DELAY_MS: "3000" } } });
+
+  test("the backend fields are off while it runs, so nothing typed meanwhile is dropped", async ({ app, window }) => {
+    const panel = await openMachinesSettings(window, app);
+    await panel.getByRole("combobox", { name: "Backend for darwine" }).selectOption("openai-compatible");
+    const fields = [
+      panel.getByRole("textbox", { name: "API URL for darwine" }),
+      panel.getByLabel("Bearer token for darwine"),
+      panel.getByLabel("Clear saved token"),
+    ];
+    await fields[0].fill("http://127.0.0.1:9/v1");
+    await fields[1].fill("held-fixture-token");
+    await panel.getByRole("button", { name: "Save backend" }).click();
+    for (const field of fields) await expect(field).toBeDisabled();
+    await expect(panel.locator(".aya-modal-hint code")).toHaveText("held••••••••", { timeout: 10_000 });
+    for (const field of fields) await expect(field).toBeEnabled();
+  });
 });
