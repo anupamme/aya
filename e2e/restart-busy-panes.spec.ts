@@ -1,7 +1,9 @@
 // #217: a restart of the PTY host stops every pane's process, as an update's does. Aya asks first about an agent
-// mid-turn and a shell running a command, not only about background tasks: Cancel keeps both, Restart stops them.
+// mid-turn and a shell running a command, not only about background tasks: Cancel keeps both processes, Restart
+// stops them.
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ElectronApplication, Locator, Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { fireShortcut } from "./helpers/shortcut";
@@ -9,8 +11,10 @@ import { agentPreset } from "./helpers/team";
 import { visiblePane, waitForShellReady } from "./helpers/terminal";
 
 // team-agent.cjs in "busy" mode draws Claude's footer mid-turn ("esc to interrupt") in tab-right; named `claude`,
-// with the preset's agent, the pane is Claude's to Aya.
-const BUSY = { ...agentPreset("busy", "claude"), id: "busy", name: "Busy" };
+// with the preset's agent, the pane is Claude's to Aya. Busy mode ignores the argument after it: this run's mark,
+// so ps finds this agent and no other test's.
+const MARK = `restart-busy-${randomUUID().slice(0, 8)}`;
+const BUSY = { ...agentPreset(`busy ${MARK}`, "claude"), id: "busy", name: "Busy" };
 // A length nothing else on the machine sleeps for, so ps finds this command only.
 const COMMAND = "sleep 3593";
 const QUESTION =
@@ -56,6 +60,15 @@ async function restartHost(settings: Locator) {
   await settings.locator(".aya-settings-general-row", { hasText: "PTY host" }).getByRole("button", { name: "Restart" }).click();
 }
 
+/** The pids of the busy stand-in agent now. */
+function agents(): number[] {
+  return execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" })
+    .split("\n")
+    .map((line) => line.trim().match(/^(\d+) (.*)$/))
+    .filter((m): m is RegExpMatchArray => m !== null && m[2].includes("team-agent.cjs") && m[2].includes(MARK))
+    .map((m) => Number(m[1]));
+}
+
 /** The pids running COMMAND now. */
 function sleeping(): number[] {
   return execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" })
@@ -75,18 +88,22 @@ test("a host restart asks about an agent mid-turn and a shell running a command"
   await window.keyboard.press("Enter");
   await expect.poll(sleeping, { timeout: 10_000 }).toHaveLength(1);
   const [sleep] = sleeping();
+  expect(agents()).toHaveLength(1);
+  const [agent] = agents();
   const settings = await openDiagnostics(app, window);
 
-  // Cancel: asked about both panes, and the command keeps running.
+  // Cancel: asked about both panes, and the command and the agent keep running.
   await answerDialogs(app, 1);
   await restartHost(settings);
   await expect.poll(() => asked(app)).toEqual([QUESTION]);
   await window.waitForTimeout(1_000);
   expect(sleeping()).toEqual([sleep]);
+  expect(agents()).toEqual([agent]);
 
-  // Restart: asked again, and the restart stops the command.
+  // Restart: asked again, and the restart stops the command and the agent's process.
   await answerDialogs(app, 0);
   await restartHost(settings);
   await expect.poll(() => asked(app)).toEqual([QUESTION, QUESTION]);
   await expect.poll(sleeping, { timeout: 15_000 }).toEqual([]);
+  await expect.poll(agents, { timeout: 15_000 }).not.toContain(agent);
 });
