@@ -108,7 +108,7 @@ test("usage.json is never observable half-written", { skip }, async () => {
   }
 });
 
-test("a failed fetch leaves no scratch file behind", { skip }, async () => {
+test("a failed fetch exits quietly and leaves no scratch file behind", { skip }, async () => {
   const e = setup({ initial: true, throttled: false });
   writeFileSync(join(e.bin, "curl"), `#!/bin/sh\nprintf 'not json'\n`);
   // A non-default config dir skips the copy to usage.json, which would otherwise consume the scratch file.
@@ -116,7 +116,8 @@ test("a failed fetch leaves no scratch file behind", { skip }, async () => {
   mkdirSync(other);
   writeFileSync(join(other, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "t" } }));
   try {
-    await run("/bin/bash", e, { AYA_CLAUDE_CONFIG_DIR: other });
+    const r = await run("/bin/bash", e, { AYA_CLAUDE_CONFIG_DIR: other });
+    assert.equal(r.code, 0, `a bad answer must not fail the session's hook: ${r.err}`);
     assert.deepEqual(readdirSync(e.aya).filter((f) => f.endsWith(".tmp")), []);
   } finally {
     rmSync(e.home, { recursive: true, force: true });
