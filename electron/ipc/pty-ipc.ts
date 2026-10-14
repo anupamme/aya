@@ -23,7 +23,7 @@ export interface PtyIpcDeps {
   forgetBrief: (ptyId: string) => Promise<void>;
   /** The user's typing reached a pane: an Enter that answers a waiting agent drops its status in every window. */
   noteTyping: (ptyId: string, text: string) => Promise<void>;
-  /** Asks before restarting a pane that shows background work. */
+  /** Asks before restarting a pane whose work the restart would stop. */
   confirmRestartPane: (ptyId: string) => Promise<boolean>;
   /** Replaces the host after asking; throws when cancelled or when the old host did not exit. */
   restartHost: () => Promise<void>;
