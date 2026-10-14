@@ -9,6 +9,7 @@ import {
   cleanTerminalOutput,
   readAyaIntelligenceConfig,
   readSummaryCache,
+  setOpenAiApiKey,
   summariesFromCache,
   summaryHash,
   type AutoSummaryStatus,
@@ -212,10 +213,16 @@ export function useLocalSummaries({ terminalsRef, projectsRef }: LocalSummariesO
 
   const updateAyaIntelligence = useCallback((next: AyaIntelligenceConfig) => {
     setAyaIntelligence(next);
+    // The API key is a credential - keep it in memory only, never written
+    // to localStorage (see src/local-summaries.ts).
+    setOpenAiApiKey(next.openAiApiKey);
     summaryMetaRef.current = {};
     setSummaryNudge((n) => n + 1);
     try {
-      localStorage.setItem(AYA_INTELLIGENCE_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(
+        AYA_INTELLIGENCE_STORAGE_KEY,
+        JSON.stringify({ ...next, openAiApiKey: "" }),
+      );
     } catch {
       /* ignore — localStorage can be unavailable in odd embedded contexts */
     }

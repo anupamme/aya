@@ -25,6 +25,15 @@ export const DEFAULT_AYA_INTELLIGENCE: AyaIntelligenceConfig = {
   openAiModel: RECOMMENDED_OLLAMA_MODEL,
 };
 
+// The OpenAI API key is a credential and is kept in memory only - never
+// persisted to localStorage, which is readable by any script in this origin
+// (e.g. via XSS). Callers that change it must also call setOpenAiApiKey.
+let inMemoryOpenAiApiKey = "";
+
+export function setOpenAiApiKey(key: string): void {
+  inMemoryOpenAiApiKey = key;
+}
+
 export interface AutoSummaryStatus {
   terminalCount: number;
   terminalsWithLines: number;
@@ -92,7 +101,7 @@ export function summariesFromCache(
 export function readAyaIntelligenceConfig(): AyaIntelligenceConfig {
   try {
     const raw = localStorage.getItem(AYA_INTELLIGENCE_STORAGE_KEY);
-    if (!raw) return DEFAULT_AYA_INTELLIGENCE;
+    if (!raw) return { ...DEFAULT_AYA_INTELLIGENCE, openAiApiKey: inMemoryOpenAiApiKey };
     const parsed = JSON.parse(raw) as Partial<AyaIntelligenceConfig>;
     return {
       provider:
@@ -107,8 +116,9 @@ export function readAyaIntelligenceConfig(): AyaIntelligenceConfig {
         typeof parsed.openAiBaseUrl === "string"
           ? parsed.openAiBaseUrl
           : DEFAULT_AYA_INTELLIGENCE.openAiBaseUrl,
-      openAiApiKey:
-        typeof parsed.openAiApiKey === "string" ? parsed.openAiApiKey : "",
+      // Never read the key back out of localStorage - it is never written
+      // there in the first place (see setOpenAiApiKey above).
+      openAiApiKey: inMemoryOpenAiApiKey,
       openAiModel:
         typeof parsed.openAiModel === "string" && parsed.openAiModel.trim()
           ? parsed.openAiModel.trim()
